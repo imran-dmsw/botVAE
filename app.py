@@ -20,6 +20,7 @@ from reports.generator import (
     generate_word_report,
     generate_pdf_report,
     generate_json_report,
+    generate_multi_pdf_report,
 )
 from data.history import save_scenario, get_summary_df, clear_history
 
@@ -361,7 +362,12 @@ def scenario_form(key_prefix: str = "", title: str = "Parametres du scenario"):
 
 # ─── Results display ──────────────────────────────────────────────────────────
 
-def display_results(scenario: ScenarioInput, result, show_export: bool = True):
+def display_results(
+    scenario: ScenarioInput,
+    result,
+    show_export: bool = True,
+    chart_key_prefix: str = "result",
+):
     st.markdown("---")
     st.subheader("📊 Resultats")
 
@@ -385,13 +391,13 @@ def display_results(scenario: ScenarioInput, result, show_export: bool = True):
     # Waterfall
     st.subheader("Decomposition financiere")
     fig = _waterfall_chart(result)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=f"{chart_key_prefix}_waterfall")
 
     # Cost pie + detail table
     col_pie, col_cost = st.columns(2)
     with col_pie:
         fig2 = _cost_pie(result)
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, use_container_width=True, key=f"{chart_key_prefix}_cost_pie")
 
     with col_cost:
         st.markdown("**Detail des couts**")
@@ -605,7 +611,11 @@ def page_single_simulation():
             return
 
     if "last_result" in st.session_state:
-        display_results(st.session_state["last_scenario"], st.session_state["last_result"])
+        display_results(
+            st.session_state["last_scenario"],
+            st.session_state["last_result"],
+            chart_key_prefix="single_last",
+        )
 
 
 def page_multi_scenario():
@@ -671,7 +681,11 @@ def page_multi_scenario():
             f"**Meilleure PDM** : {names[best_pdm]}"
         )
 
-        st.plotly_chart(_radar_chart(results, names), use_container_width=True)
+        st.plotly_chart(
+            _radar_chart(results, names),
+            use_container_width=True,
+            key="multi_radar_chart",
+        )
 
         metric = st.selectbox(
             "Metrique a visualiser",
@@ -691,12 +705,26 @@ def page_multi_scenario():
             title=f"Comparaison — {metric}",
             color=names,
         )
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.plotly_chart(fig_bar, use_container_width=True, key="multi_metric_bar")
 
         st.subheader("Details par scenario")
         for i, (sc, res) in enumerate(zip(scenarios, results)):
             with st.expander(f"Details — {res.scenario_name}", expanded=False):
-                display_results(sc, res, show_export=True)
+                display_results(sc, res, show_export=True, chart_key_prefix=f"multi_detail_{i}")
+
+        st.subheader("📥 Export global multi-scenarios")
+        try:
+            multi_pdf_bytes = generate_multi_pdf_report(scenarios, results)
+            st.download_button(
+                "📑 PDF global (tous les scenarios)",
+                data=multi_pdf_bytes,
+                file_name="rapport_multi_scenarios.pdf",
+                mime="application/pdf",
+                key="download_multi_pdf",
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Impossible de generer le PDF global : {e}")
 
 
 def page_objective_mode():
@@ -798,7 +826,12 @@ def page_objective_mode():
         st.dataframe(param_df, use_container_width=True, hide_index=True)
 
         with st.expander("Resultats detailles du scenario optimal", expanded=True):
-            display_results(rec, opt.simulation_result, show_export=True)
+            display_results(
+                rec,
+                opt.simulation_result,
+                show_export=True,
+                chart_key_prefix="objective_optimal",
+            )
 
 
 def page_history():
@@ -819,7 +852,7 @@ def page_history():
             df, x="Date", y=col_map[metric_h], color="Scenario",
             markers=True, title=f"Evolution — {metric_h}",
         )
-        st.plotly_chart(fig_trend, use_container_width=True)
+        st.plotly_chart(fig_trend, use_container_width=True, key="history_trend_chart")
 
     if st.button("🗑️ Effacer tout l'historique", type="secondary"):
         clear_history()

@@ -5,13 +5,30 @@ from a ScenarioInput + SimulationResult pair.
 import io
 import json
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Sequence
 
 from engine.models import ScenarioInput, SimulationResult
 from config.market_config import MARKET_CONFIG
 
 
 # ─── Markdown / text report ───────────────────────────────────────────────────
+
+
+def _pdf_safe(text: object) -> str:
+    """
+    Normalize text for core FPDF fonts (latin-1).
+    Replaces common unicode punctuation and degrades unsupported chars safely.
+    """
+    s = str(text)
+    s = (
+        s.replace("–", "-")
+        .replace("—", "-")
+        .replace("’", "'")
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("…", "...")
+    )
+    return s.encode("latin-1", "replace").decode("latin-1")
 
 def generate_markdown_report(scenario: ScenarioInput, result: SimulationResult) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -285,7 +302,13 @@ def generate_pdf_report(scenario: ScenarioInput, result: SimulationResult) -> by
     pdf.set_font("Helvetica", "B", 16)
     pdf.cell(0, 10, "Rapport de Simulation VAE", ln=True, align="C")
     pdf.set_font("Helvetica", size=9)
-    pdf.cell(0, 6, f"Firme : {result.firm_name}  |  Periode : {result.period}  |  {now}", ln=True, align="C")
+    pdf.cell(
+        0,
+        6,
+        _pdf_safe(f"Firme : {result.firm_name}  |  Periode : {result.period}  |  {now}"),
+        ln=True,
+        align="C",
+    )
     status_txt = "Scenario VALIDE" if result.is_valid else "Scenario NON VALIDE"
     pdf.set_text_color(0, 128, 0) if result.is_valid else pdf.set_text_color(200, 0, 0)
     pdf.set_font("Helvetica", "B", 10)
@@ -312,8 +335,8 @@ def generate_pdf_report(scenario: ScenarioInput, result: SimulationResult) -> by
     # usable width = 210 - 2*15 = 180mm; split 60/40
     cw1, cw2 = 110, 70
     for k, v in kpis:
-        pdf.cell(cw1, 7, k, border=1)
-        pdf.cell(cw2, 7, v, border=1, ln=True)
+        pdf.cell(cw1, 7, _pdf_safe(k), border=1)
+        pdf.cell(cw2, 7, _pdf_safe(v), border=1, ln=True)
     pdf.ln(4)
 
     # Section 2
@@ -333,8 +356,8 @@ def generate_pdf_report(scenario: ScenarioInput, result: SimulationResult) -> by
         ("PROFIT", f"{result.profit:,.0f} $"),
     ]
     for k, v in fin_rows:
-        pdf.cell(cw1, 7, k, border=1)
-        pdf.cell(cw2, 7, v, border=1, ln=True)
+        pdf.cell(cw1, 7, _pdf_safe(k), border=1)
+        pdf.cell(cw2, 7, _pdf_safe(v), border=1, ln=True)
     pdf.ln(4)
 
     page_w = pdf.w - pdf.l_margin - pdf.r_margin
@@ -347,7 +370,7 @@ def generate_pdf_report(scenario: ScenarioInput, result: SimulationResult) -> by
     if result.alerts:
         for a in result.alerts:
             pdf.set_x(pdf.l_margin)
-            pdf.multi_cell(page_w, 6, f"- {a}")
+            pdf.multi_cell(page_w, 6, _pdf_safe(f"- {a}"))
     else:
         pdf.set_x(pdf.l_margin)
         pdf.cell(0, 6, "Aucune alerte.", ln=True)
@@ -360,7 +383,7 @@ def generate_pdf_report(scenario: ScenarioInput, result: SimulationResult) -> by
     pdf.set_font("Helvetica", size=10)
     for i in result.interpretations:
         pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(page_w, 6, f"- {i}")
+        pdf.multi_cell(page_w, 6, _pdf_safe(f"- {i}"))
     pdf.ln(2)
 
     # Section 5 — Recommendations
@@ -371,10 +394,132 @@ def generate_pdf_report(scenario: ScenarioInput, result: SimulationResult) -> by
     recs = _generate_recommendations(scenario, result)
     for r in recs:
         pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(page_w, 6, r.lstrip("- "))
+        pdf.multi_cell(page_w, 6, _pdf_safe(r.lstrip("- ")))
 
     pdf.set_font("Helvetica", "I", 8)
     pdf.ln(4)
-    pdf.cell(0, 6, f"Rapport genere automatiquement par le Bot de Simulation VAE - {now}", ln=True, align="C")
+    pdf.cell(
+        0,
+        6,
+        _pdf_safe(f"Rapport genere automatiquement par le Bot de Simulation VAE - {now}"),
+        ln=True,
+        align="C",
+    )
 
+    return bytes(pdf.output())
+
+
+def generate_multi_pdf_report(
+    scenarios: Sequence[ScenarioInput],
+    results: Sequence[SimulationResult],
+) -> bytes:
+    """Build a single PDF that consolidates multiple simulated scenarios."""
+    from fpdf import FPDF
+
+    if len(scenarios) != len(results):
+        raise ValueError("Le nombre de scenarios et de resultats doit etre identique.")
+    if not scenarios:
+        raise ValueError("Aucun scenario a exporter.")
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=10)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    page_w = pdf.w - pdf.l_margin - pdf.r_margin
+
+    def _safe_multiline(text: object, h: float = 6) -> None:
+        """Write text with explicit usable width to avoid horizontal-space errors."""
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(page_w, h, _pdf_safe(text))
+
+    # Cover
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, "Rapport Multi-Scenarios VAE", ln=True, align="C")
+    pdf.set_font("Helvetica", size=9)
+    pdf.cell(0, 6, _pdf_safe(f"Genere le : {now}"), ln=True, align="C")
+    pdf.cell(0, 6, _pdf_safe(f"Nombre de scenarios : {len(results)}"), ln=True, align="C")
+    pdf.ln(6)
+
+    # Consolidated comparison block (text lines instead of fixed table to avoid
+    # horizontal-space rendering issues in FPDF with variable content widths).
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "1. Tableau comparatif", ln=True)
+    pdf.set_font("Helvetica", size=10)
+    _safe_multiline("Colonnes: Scenario | Ventes | Profit ($) | Marge | PDM | Service")
+    pdf.ln(1)
+    for r in results:
+        line = (
+            f"- {(r.scenario_name or 'Scenario')[:40]} | "
+            f"{r.sales:,} | {r.profit:,.0f} $ | {r.margin*100:.1f}% | "
+            f"{r.market_share*100:.2f}% | {r.service_rate*100:.1f}%"
+        )
+        _safe_multiline(line)
+    pdf.ln(4)
+
+    # Best scenarios
+    best_profit = max(results, key=lambda x: x.profit)
+    best_margin = max(results, key=lambda x: x.margin)
+    best_pdm = max(results, key=lambda x: x.market_share)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, "2. Top performances", ln=True)
+    pdf.set_font("Helvetica", size=10)
+    _safe_multiline(f"- Meilleur profit : {best_profit.scenario_name} ({best_profit.profit:,.0f} $)")
+    _safe_multiline(f"- Meilleure marge : {best_margin.scenario_name} ({best_margin.margin*100:.1f}%)")
+    _safe_multiline(f"- Meilleure PDM : {best_pdm.scenario_name} ({best_pdm.market_share*100:.2f}%)")
+
+    # Detailed section per scenario
+    for i, (sc, res) in enumerate(zip(scenarios, results), start=1):
+        pdf.add_page()
+        page_w = pdf.w - pdf.l_margin - pdf.r_margin
+        seg_label = MARKET_CONFIG["segments"][sc.segment]["label"]
+
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.cell(0, 8, _pdf_safe(f"Scenario {i} - {res.scenario_name}"), ln=True)
+        pdf.set_font("Helvetica", size=10)
+        pdf.cell(
+            0,
+            6,
+            _pdf_safe(f"Firme : {res.firm_name}  |  Periode : {res.period}  |  Segment : {seg_label}"),
+            ln=True,
+        )
+        pdf.ln(2)
+
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, "Hypotheses", ln=True)
+        pdf.set_font("Helvetica", size=10)
+        _safe_multiline(
+            f"Prix: {sc.price:,.0f} $ | Promotion: {sc.promotion_rate*100:.1f}% | Production: {sc.production:,} unites"
+        )
+        _safe_multiline(
+            f"Marketing: {sc.marketing_budget:,.0f} $ | R&D: {sc.rd_budget:,.0f} $ | Durabilite: {sc.sustainability_investment:,.0f} $"
+        )
+        pdf.ln(1)
+
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, "KPIs", ln=True)
+        pdf.set_font("Helvetica", size=10)
+        _safe_multiline(
+            f"Ventes: {res.sales:,} | CA: {res.revenue:,.0f} $ | Profit: {res.profit:,.0f} $ | "
+            f"Marge: {res.margin*100:.1f}% | PDM: {res.market_share*100:.2f}% | Service: {res.service_rate*100:.1f}%"
+        )
+
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, "Alertes", ln=True)
+        pdf.set_font("Helvetica", size=10)
+        if res.alerts:
+            for alert in res.alerts:
+                _safe_multiline(f"- {alert}")
+        else:
+            pdf.cell(0, 6, "Aucune alerte.", ln=True)
+
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.ln(4)
+    pdf.cell(
+        0,
+        6,
+        _pdf_safe(f"Rapport genere automatiquement par le Bot de Simulation VAE - {now}"),
+        ln=True,
+        align="C",
+    )
     return bytes(pdf.output())
