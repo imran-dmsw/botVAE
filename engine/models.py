@@ -48,7 +48,7 @@ class MarketingChannels(BaseModel):
 class ScenarioInput(BaseModel):
     # ── Identification ──────────────────────────────────────────────────────
     firm_name: str = Field("Firme A", description="Nom de la firme")
-    period: int = Field(1, ge=1, le=15, description="Periode de simulation (1=2026 ... 15=2040)")
+    period: int = Field(1, ge=1, le=8, description="Periode de simulation (1=2027 ... 8=2034)")
     scenario_name: str = Field("Scenario 1", description="Nom du scenario")
 
     # ── Product ─────────────────────────────────────────────────────────────
@@ -81,6 +81,10 @@ class ScenarioInput(BaseModel):
     production: int = Field(1000, ge=0, description="Unites produites")
     withdraw_model: bool = Field(False, description="Retrait du modele du marche")
     liquidation: bool = Field(False, description="Mode liquidation")
+
+    # ── Withdrawal tracking (context across periods) ─────────────────────────
+    total_withdrawals_used: int = Field(0, ge=0, description="Nombre de retraits utilises jusqu'ici (simulation)")
+    last_withdrawal_period: int = Field(0, ge=0, description="Periode du dernier retrait (0 = aucun)")
 
     # ── Context (used by engine) ─────────────────────────────────────────────
     adjusted_budget: float = Field(

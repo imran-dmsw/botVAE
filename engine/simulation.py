@@ -8,12 +8,18 @@ Demand model (attraction / logit):
   demand            = market_share_seg * segment_size
   sales             = min(demand, production)
 
-Market growth (two-phase):
-  Phase 1 — periods 1-9  (2026-2034): +15%/yr units
-  Phase 2 — periods 10-15 (2035-2040): +17.5%/yr units
+Market growth (single phase, Excel parameters):
+  Reference year 2026: 110,000 units
+  Period 1 = 2027: 110,000 * 1.12 = 123,200 units
+  Growth: +12%/yr for all 8 decision periods (2027-2034)
+  Formula: base_market_size * (1 + growth_rate) ** period
+
+COGS model (Excel parameters):
+  unit_cost = effective_price * cogs_ratio[range]
+  cogs_ratio: entry=60%, mid=57%, premium=55%
 """
 import math
-from typing import List
+from typing import List, Optional
 
 from config.market_config import MARKET_CONFIG
 from engine.models import ScenarioInput, SimulationResult
@@ -23,18 +29,14 @@ from engine.rules import validate_scenario
 # ─── Market size helpers ──────────────────────────────────────────────────────
 
 def total_market_size(period: int) -> float:
-    """Return total market size (units) for the given period using two-phase growth."""
-    cfg = MARKET_CONFIG
-    base = cfg["base_market_size"]
-    g1 = cfg["growth_rate_phase1"]
-    g2 = cfg["growth_rate_phase2"]
-    change = cfg["phase_change_period"]
+    """Return total market size (units) for the given period.
 
-    if period <= change:
-        return base * ((1 + g1) ** (period - 1))
-    else:
-        size_at_change = base * ((1 + g1) ** (change - 1))
-        return size_at_change * ((1 + g2) ** (period - change))
+    period 1 = 2027: 110,000 * 1.12^1 = 123,200
+    period 8 = 2034: 110,000 * 1.12^8 = 272,378
+    """
+    base = MARKET_CONFIG["base_market_size"]   # 110,000 (reference year 2026)
+    g = MARKET_CONFIG["growth_rate"]            # 0.12
+    return base * ((1 + g) ** period)
 
 
 def segment_size(period: int, segment: str) -> float:
@@ -43,6 +45,7 @@ def segment_size(period: int, segment: str) -> float:
 
 
 def period_to_year(period: int) -> int:
+    """period 1 → 2027, period 8 → 2034."""
     return MARKET_CONFIG["base_year"] + (period - 1)
 
 
@@ -51,7 +54,6 @@ def period_to_year(period: int) -> int:
 def calc_attractiveness(s: ScenarioInput) -> float:
     cfg = MARKET_CONFIG
     seg_cfg = cfg["segments"][s.segment]
-    range_cfg = cfg["ranges"][s.model_range]
     status_factor = cfg["product_status_factors"][s.product_status]
 
     if status_factor == 0:
@@ -119,14 +121,223 @@ def calc_scores(s: ScenarioInput):
     return new_innov, new_sustain
 
 
-# ─── Unit production cost ─────────────────────────────────────────────────────
+# ─── COGS-based unit production cost (Excel model) ────────────────────────────
 
 def get_unit_production_cost(s: ScenarioInput) -> float:
-    """Return unit production cost: product_type base cost if available, else range fallback."""
-    pt_cfg = MARKET_CONFIG["product_types"].get(s.product_type)
-    if pt_cfg:
-        return float(pt_cfg["base_cost"])
-    return float(MARKET_CONFIG["ranges"][s.model_range]["unit_production_cost"])
+    """Return unit production cost using COGS ratio (Excel: Bas=60%, Moyen=57%, Haut=55%)."""
+    cogs_ratio = MARKET_CONFIG["cogs_ratios"][s.model_range]
+    effective_price = s.price * (1.0 + s.promotion_rate)
+    return effective_price * cogs_ratio
+
+
+# ─── Production suggestion for next period ────────────────────────────────────
+
+def suggest_next_production(scenario: ScenarioInput, result: SimulationResult) -> int:
+    """
+    Suggest production quantity for the next period based on current results.
+
+    Rules:
+    - Liquidation → 0 (no production after liquidation)
+    - Withdrawal  → 0
+    - High demand (service_rate > 0.95): grow by 20%
+    - Demand met (0.85-0.95): grow by 10%
+    - Partial (0.70-0.85): maintain + 5% buffer
+    - Low demand (service_rate < 0.70): reduce to demand * 0.95
+    - New product (pre_launch): cap at 2,000 units
+    """
+    cfg = MARKET_CONFIG["constraints"]
+
+    if scenario.liquidation or scenario.withdraw_model:
+        return 0
+
+    demand = max(result.demand, 1.0)
+    sr = result.service_rate
+
+    if scenario.product_status == "pre_launch":
+        suggested = min(int(demand * 1.10), cfg["new_product_max_units"])
+    elif sr > 0.95:
+        suggested = int(demand * 1.20)   # undersupplied: grow 20%
+    elif sr > 0.85:
+        suggested = int(demand * 1.10)   # well served: grow 10%
+    elif sr > 0.70:
+        suggested = int(demand * 1.05)   # adequate: slight buffer
+    else:
+        suggested = int(demand * 0.95)   # oversupplied: reduce to near-demand
+
+    return max(suggested, 0)
+
+
+# ─── Reference scenario for full-market simulation ───────────────────────────
+
+def _make_reference_scenario(firm_key: str, segment: str, period: int) -> ScenarioInput:
+    """Build a reference ScenarioInput for a competing firm in a given segment."""
+    firm_cfg = MARKET_CONFIG["firms"][firm_key]
+    seg_cfg = MARKET_CONFIG["segments"][segment]
+    range_key = firm_cfg.get("default_range", "mid")
+    range_cfg = MARKET_CONFIG["ranges"][range_key]
+
+    # Price: segment reference price × range multiplier
+    price = seg_cfg["reference_price"] * range_cfg.get("price_multiplier", 1.0)
+
+    # Budget estimated from reference units × price
+    estimated_revenue = firm_cfg["units_ref"] * price
+    adjusted_budget = max(estimated_revenue, 100_000.0)
+    marketing = adjusted_budget * 0.08   # 8% of budget (typical)
+
+    return ScenarioInput(
+        firm_name=firm_key,
+        period=period,
+        scenario_name=f"{firm_key} ref",
+        model_name=f"{firm_key} produit",
+        product_type="ville_quotidien",
+        segment=segment,
+        model_range=range_key,
+        product_status="active",
+        price=max(price, 100.0),
+        production=firm_cfg["units_ref"],
+        marketing_budget=marketing,
+        adjusted_budget=adjusted_budget,
+        previous_innovation_score=firm_cfg.get("base_rep", 5.0),
+        previous_sustainability_score=5.0,
+        competitor_attractiveness=10.0,
+    )
+
+
+# ─── Full market simulation (all 9 firms, all segments) ───────────────────────
+
+def simulate_full_market(
+    period: int,
+    user_firm: Optional[str],
+    user_scenario: Optional[ScenarioInput],
+) -> dict:
+    """
+    Simulate competition between all 9 firms across all 6 segments.
+
+    When user_scenario is provided, its price/marketing/range/status apply to
+    ALL segments for that firm (not just one), giving a true full-market view.
+    Reference profiles are used for all competing firms.
+
+    Returns a dict with:
+      - period, year, total_market
+      - firms: {firm_key: {total_sales, total_revenue, market_share, profit_estimate,
+                            segments: {seg: {share, sales}}}}
+      - segment_breakdown: {seg_key: {firm_key: {sales, revenue, segment_share}}}
+      - segment_leaders: {seg_key: firm_key with highest share}
+    """
+    cfg = MARKET_CONFIG
+    firms_cfg = cfg["firms"]
+
+    seg_results: dict = {}
+
+    for seg_key in cfg["segments"]:
+        seg_sz = segment_size(period, seg_key)
+        firm_attrs: dict = {}
+
+        for firm_key in firms_cfg:
+            if user_firm and user_scenario and firm_key == user_firm:
+                # Apply user's strategy across ALL segments — override only the segment key
+                seg_scenario = user_scenario.model_copy(update={"segment": seg_key})
+                attr = calc_attractiveness(seg_scenario)
+            else:
+                ref = _make_reference_scenario(firm_key, seg_key, period)
+                attr = calc_attractiveness(ref)
+
+            firm_attrs[firm_key] = max(attr, 0.001)
+
+        total_attr = sum(firm_attrs.values())
+        seg_results[seg_key] = {}
+
+        for firm_key, attr in firm_attrs.items():
+            share = attr / total_attr
+            sales = int(seg_sz * share)
+
+            if user_firm and user_scenario and firm_key == user_firm:
+                price = user_scenario.price * (1.0 + user_scenario.promotion_rate)
+            else:
+                price = cfg["segments"][seg_key]["reference_price"]
+
+            seg_results[seg_key][firm_key] = {
+                "sales": sales,
+                "revenue": sales * price,
+                "segment_share": share,
+            }
+
+    # Aggregate per firm + estimate profit
+    total_mkt = total_market_size(period)
+    firm_totals: dict = {}
+
+    for firm_key in firms_cfg:
+        tot_sales = sum(seg_results[s][firm_key]["sales"] for s in seg_results)
+        tot_revenue = sum(seg_results[s][firm_key]["revenue"] for s in seg_results)
+
+        # Profit estimate: revenue × (1 - COGS - other fixed pct - typical mktg 8%)
+        if user_firm and user_scenario and firm_key == user_firm:
+            rng = user_scenario.model_range
+        else:
+            rng = firms_cfg[firm_key].get("default_range", "mid")
+
+        cogs = cfg["cogs_ratios"][rng]
+        range_cfg = cfg["ranges"][rng]
+        other_pct = (
+            range_cfg["distribution_rate"]
+            + range_cfg["operating_rate"]
+            + range_cfg["aftersales_rate"]
+        )
+        mktg_pct = 0.08
+        profit_est = tot_revenue * (1 - cogs - other_pct - mktg_pct) - cfg["fixed_overhead"]
+        margin_est = profit_est / max(tot_revenue, 1)
+
+        firm_totals[firm_key] = {
+            "total_sales": tot_sales,
+            "total_revenue": tot_revenue,
+            "market_share": tot_sales / max(total_mkt, 1),
+            "profit_estimate": profit_est,
+            "margin_estimate": margin_est,
+            "segments": {
+                seg: {
+                    "share": seg_results[seg][firm_key]["segment_share"],
+                    "sales": seg_results[seg][firm_key]["sales"],
+                }
+                for seg in seg_results
+            },
+        }
+
+    # Identify segment leaders
+    segment_leaders = {
+        seg_key: max(
+            seg_results[seg_key].items(),
+            key=lambda x: x[1]["segment_share"],
+        )[0]
+        for seg_key in seg_results
+    }
+
+    return {
+        "period": period,
+        "year": period_to_year(period),
+        "total_market": total_mkt,
+        "firms": firm_totals,
+        "segment_breakdown": seg_results,
+        "segment_leaders": segment_leaders,
+        "user_firm": user_firm,
+    }
+
+
+def simulate_full_market_all_periods(
+    user_firm: Optional[str],
+    user_scenario_template: Optional[ScenarioInput],
+) -> list:
+    """
+    Run simulate_full_market for all 8 periods.
+    Returns a list of 8 market result dicts.
+    """
+    results = []
+    for p in range(1, 9):
+        if user_scenario_template:
+            scenario_p = user_scenario_template.model_copy(update={"period": p})
+        else:
+            scenario_p = None
+        results.append(simulate_full_market(p, user_firm, scenario_p))
+    return results
 
 
 # ─── Interpretations ─────────────────────────────────────────────────────────
@@ -147,41 +358,50 @@ def _build_interpretations(
     interp = []
     cfg = MARKET_CONFIG["constraints"]
 
-    # Profitability
-    if margin >= 0.20:
-        interp.append(f"Excellente rentabilite : marge de {margin*100:.1f}% tres au-dessus du seuil minimal.")
-    elif margin >= 0.10:
-        interp.append(f"Bonne rentabilite : marge de {margin*100:.1f}%, au-dessus de la moyenne.")
+    # Profitability vs target zone
+    if margin >= cfg["profit_target_max"]:
+        interp.append(f"Excellente rentabilite : marge de {margin*100:.1f}% - au-dessus de la zone cible (5-10%).")
+    elif margin >= cfg["profit_target_min"]:
+        interp.append(f"Bonne rentabilite : marge de {margin*100:.1f}% dans la zone cible (5-10%).")
     elif margin >= cfg["min_profit_rate"]:
-        interp.append(f"Rentabilite correcte mais faible ({margin*100:.1f}%). Surveiller les couts.")
+        interp.append(f"Rentabilite correcte mais sous la cible ({margin*100:.1f}% < 5%). Chercher a optimiser le mix.")
     elif margin >= 0:
         interp.append(f"Rentabilite insuffisante ({margin*100:.1f}%) : en dessous du seuil reglementaire de 2 %.")
     else:
         interp.append(f"Scenario deficitaire : perte de {-profit:,.0f} $. Revoir la strategie de prix ou de couts.")
 
-    # Price vs cost hint
+    # Price vs COGS hint
     effective_price = s.price * (1.0 + s.promotion_rate)
-    range_cfg = MARKET_CONFIG["ranges"][s.model_range]
-    target_price = unit_cost + range_cfg["target_margin_per_unit"]
-    if effective_price < unit_cost * 1.05:
+    cogs_ratio = MARKET_CONFIG["cogs_ratios"][s.model_range]
+    non_prod_costs_pct = (
+        MARKET_CONFIG["ranges"][s.model_range]["distribution_rate"]
+        + MARKET_CONFIG["ranges"][s.model_range]["operating_rate"]
+        + MARKET_CONFIG["ranges"][s.model_range]["aftersales_rate"]
+    )
+    remaining_pct = 1.0 - cogs_ratio - non_prod_costs_pct
+    if effective_price > 0:
         interp.append(
-            f"Attention : prix effectif ({effective_price:,.0f} $) proche ou inferieur au cout unitaire "
-            f"({unit_cost:,.0f} $). Marge brute tres reduite."
-        )
-    elif effective_price < target_price:
-        interp.append(
-            f"Prix effectif ({effective_price:,.0f} $) inferieur au prix cible gamme "
-            f"({target_price:,.0f} $, soit cout + {range_cfg['target_margin_per_unit']:,} $). "
-            f"Envisager une hausse de prix."
+            f"Structure des couts (gamme {MARKET_CONFIG['ranges'][s.model_range]['label']}) : "
+            f"COGS {cogs_ratio*100:.0f}% + frais variables {non_prod_costs_pct*100:.0f}% "
+            f"= {(cogs_ratio+non_prod_costs_pct)*100:.0f}% du CA. "
+            f"Marge brute disponible avant mktg/R&D : {remaining_pct*100:.0f}%."
         )
 
-    # Marketing intensity
+    # Marketing intensity vs ROI (target 0-10% of revenue)
+    mkt_over_rev = s.marketing_budget / max(revenue, 1.0) if revenue > 0 else 0
     if s.marketing_budget >= marketing_max * 0.95:
         interp.append("Budget marketing au maximum reglementaire : toute hausse supplementaire est impossible.")
-    elif s.marketing_budget >= marketing_max * 0.75:
-        interp.append("Budget marketing eleve : effort commercial fort, surveiller l'impact sur la rentabilite.")
+    elif mkt_over_rev > 0.10:
+        interp.append(
+            f"Budget marketing eleve ({mkt_over_rev*100:.1f}% du CA) — cible : 0-10 % du CA pour un bon ROI."
+        )
     elif s.marketing_budget == 0:
         interp.append("Aucun budget marketing : visibilite tres reduite, parts de marche a risque.")
+    else:
+        interp.append(
+            f"Budget marketing : {mkt_over_rev*100:.1f}% du CA "
+            f"({'dans la cible' if mkt_over_rev <= 0.10 else 'au-dessus de la cible'} 0-10%)."
+        )
 
     # R&D / innovation
     if s.rd_budget > 0:
@@ -197,34 +417,39 @@ def _build_interpretations(
     if s.sustainability_investment > 0:
         interp.append(
             f"Investissement durabilite ({s.sustainability_investment:,.0f} $) : "
-            f"impact sur les couts a court terme, benefice image et fidelite long terme."
+            f"impact sur les couts a court terme, benefice image long terme."
         )
 
     # Service rate
     if service_rate < 0.70:
         interp.append(
-            f"Taux de service critique ({service_rate*100:.0f}%) : la demande depasse fortement la capacite, "
-            f"risque majeur de perte de clients au profit des concurrents."
+            f"Taux de service critique ({service_rate*100:.0f}%) : demande depasse fortement la capacite."
         )
     elif service_rate < 0.90:
         interp.append(
-            f"Taux de service moyen ({service_rate*100:.0f}%) : demande partiellement non satisfaite, "
-            f"envisager d'augmenter la production."
+            f"Taux de service moyen ({service_rate*100:.0f}%) : envisager d'augmenter la production."
+        )
+
+    # Promotion scenario hint
+    promo_pct = abs(s.promotion_rate) * 100
+    if s.liquidation:
+        interp.append(
+            f"Scenario liquidation (-{promo_pct:.0f}%) : production de la periode suivante = 0 obligatoire."
+        )
+    elif s.promotion_rate < 0:
+        interp.append(
+            f"Promotion de -{promo_pct:.0f}% appliquee : impact direct sur la marge brute."
         )
 
     # Product lifecycle
     status_msgs = {
-        "pre_launch":  "Produit en phase de pre-lancement : contribution aux ventes faible, phase de montee en puissance.",
-        "withdrawal":  "Produit en phase de retrait : ventes declinantes, planifier le successeur.",
+        "pre_launch":  "Produit en pre-lancement : ventes limitees a 1,000-2,000 unites recommandees.",
+        "withdrawal":  "Produit en retrait : ventes declinantes, planifier le successeur.",
         "development": "Produit en developpement : aucune vente generee cette periode.",
         "inactive":    "Produit inactif : aucune vente generee.",
     }
     if s.product_status in status_msgs:
         interp.append(status_msgs[s.product_status])
-
-    # New model launch
-    if s.new_model_launch:
-        interp.append("Lancement d'un nouveau modele : boost innovation active, rentabilite court terme reduite.")
 
     # Market year info
     year = period_to_year(s.period)
@@ -241,7 +466,6 @@ def _build_interpretations(
 def simulate(scenario: ScenarioInput) -> SimulationResult:
     cfg = MARKET_CONFIG
     range_cfg = cfg["ranges"][scenario.model_range]
-    seg_cfg = cfg["segments"][scenario.segment]
 
     # ── Validation alerts ────────────────────────────────────────────────────
     raw_alerts = validate_scenario(scenario)
@@ -279,12 +503,12 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
             f"Production excessive : environ {unsold:,} unites non vendues - risque de surstockage."
         )
 
-    # ── Financial calculations ────────────────────────────────────────────────
+    # ── Financial calculations (COGS ratio model) ─────────────────────────────
     effective_price = scenario.price * (1.0 + scenario.promotion_rate)
     revenue = sales * effective_price
 
-    unit_cost = get_unit_production_cost(scenario)
-    production_cost = sales * unit_cost
+    unit_cost = get_unit_production_cost(scenario)      # price * cogs_ratio
+    production_cost = sales * unit_cost                  # = revenue * cogs_ratio
     distribution_cost = revenue * range_cfg["distribution_rate"]
     marketing_cost = scenario.marketing_budget
     rd_cost = scenario.rd_budget

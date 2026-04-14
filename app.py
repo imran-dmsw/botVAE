@@ -7,13 +7,19 @@ Interface Streamlit — 4 modules :
   4. Historique
 """
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
+import pathlib
+from typing import Optional
 
 from config.market_config import MARKET_CONFIG
 from engine.models import ScenarioInput, MarketingChannels
-from engine.simulation import simulate, simulate_multi, period_to_year, total_market_size
+from engine.simulation import (
+    simulate, simulate_multi, period_to_year, total_market_size,
+    simulate_full_market, simulate_full_market_all_periods, suggest_next_production,
+)
 from engine.optimizer import find_parameters_for_target, SUPPORTED_METRICS
 from reports.generator import (
     generate_markdown_report,
@@ -37,6 +43,7 @@ CFG = MARKET_CONFIG
 SEGMENT_OPTIONS = {v["label"]: k for k, v in CFG["segments"].items()}
 RANGE_OPTIONS = {v["label"]: k for k, v in CFG["ranges"].items()}
 PRODUCT_TYPE_OPTIONS = {v["label"]: k for k, v in CFG["product_types"].items()}
+FIRM_OPTIONS = list(CFG["firms"].keys())   # ["AVE", "CAN", ..., "VEL"]
 STATUS_OPTIONS = {
     "Actif": "active",
     "Pre-lancement": "pre_launch",
@@ -190,6 +197,8 @@ def build_scenario_from_form(key_prefix: str = "") -> ScenarioInput:
             f"{p}comp_attr",
             CFG["default_competitor_attractiveness"].get(seg_key, 12.0),
         ),
+        total_withdrawals_used=st.session_state.get(f"{p}total_withdrawals_used", 0),
+        last_withdrawal_period=st.session_state.get(f"{p}last_withdrawal_period", 0),
     )
 
 
@@ -202,7 +211,7 @@ def scenario_form(key_prefix: str = "", title: str = "Parametres du scenario"):
         col1, col2, col3 = st.columns(3)
         with col1:
             st.text_input("Firme", value="Firme A", key=f"{p}firm_name")
-            st.number_input("Periode", min_value=1, max_value=15, value=1, step=1, key=f"{p}period")
+            st.number_input("Periode", min_value=1, max_value=8, value=1, step=1, key=f"{p}period")
             st.text_input("Nom du scenario", value="Scenario 1", key=f"{p}scenario_name")
         with col2:
             st.text_input("Nom du modele", value="Modele X", key=f"{p}model_name")
@@ -336,9 +345,9 @@ def scenario_form(key_prefix: str = "", title: str = "Parametres du scenario"):
                 help=f"Prix cible suggere : {suggested_price:,.0f} $ (cout + marge gamme + options)"
             )
         with col_p2:
-            st.number_input("Taux de promotion (%)", min_value=-20.0, max_value=0.0,
+            st.number_input("Taux de promotion (%)", min_value=-10.0, max_value=0.0,
                             value=0.0, step=1.0, key=f"{p}promo_rate",
-                            help="Standard max : -5% | Liquidation max : -20%")
+                            help="Standard max : -5% | Liquidation max : -10%")
         with col_p3:
             st.number_input("Production (unites)", min_value=0, value=1000, step=100, key=f"{p}production")
         with col_p4:
@@ -358,6 +367,26 @@ def scenario_form(key_prefix: str = "", title: str = "Parametres du scenario"):
             default_comp = CFG["default_competitor_attractiveness"].get(seg_key2, 12.0)
             st.number_input("Attractivite concurrents (segment)", min_value=0.1, value=default_comp,
                             step=0.5, key=f"{p}comp_attr")
+
+        # ── Suivi des retraits (regles de jeu) ────────────────────────────────
+        with st.expander("Suivi des retraits (regles de simulation)", expanded=False):
+            wc1, wc2 = st.columns(2)
+            with wc1:
+                st.number_input(
+                    "Retraits deja utilises (cumul)", min_value=0, max_value=4, value=0, step=1,
+                    key=f"{p}total_withdrawals_used",
+                    help="Regle : max 4 retraits sur toute la simulation",
+                )
+            with wc2:
+                st.number_input(
+                    "Derniere periode de retrait (0 = aucun)", min_value=0, max_value=8, value=0, step=1,
+                    key=f"{p}last_withdrawal_period",
+                    help="Regle : min 2 periodes entre deux retraits",
+                )
+            st.caption(
+                f"Regle : max 4 retraits / simulation | max 1 retrait toutes les 2 periodes | "
+                f"Production = 0 la periode suivant une liquidation"
+            )
 
 
 # ─── Results display ──────────────────────────────────────────────────────────
@@ -387,6 +416,35 @@ def display_results(
     k9.metric("Score durabilite", f"{result.sustainability_score:.1f}/10")
     valid_icon = "✅ Valide" if result.is_valid else "❌ Non valide"
     k10.metric("Statut", valid_icon)
+
+    # Profit target zone indicator
+    target_min = CFG["constraints"]["profit_target_min"]
+    target_max = CFG["constraints"]["profit_target_max"]
+    if result.revenue > 0:
+        if target_min <= result.margin <= target_max:
+            st.success(
+                f"✅ Marge dans la zone cible ({target_min*100:.0f}%-{target_max*100:.0f}%) : {result.margin*100:.1f}%"
+            )
+        elif result.margin > target_max:
+            st.info(
+                f"📈 Marge au-dessus de la cible ({result.margin*100:.1f}% > {target_max*100:.0f}%) — "
+                "excellent, mais verifiez si une reduction de prix augmenterait les parts de marche."
+            )
+        else:
+            st.warning(
+                f"⚠️ Marge sous la cible ({result.margin*100:.1f}% < {target_min*100:.0f}%) — "
+                "zone cible : 5-10%."
+            )
+
+    # Production suggestion for next period
+    next_prod = suggest_next_production(scenario, result)
+    if next_prod == 0 and (scenario.liquidation or scenario.withdraw_model):
+        st.error("🔴 Production periode suivante : **0 unite** (liquidation / retrait — regle obligatoire).")
+    else:
+        st.info(
+            f"🔧 Production suggérée pour la periode suivante : **{next_prod:,} unites** "
+            f"(basee sur demande estimee {result.demand:,.0f} u., taux de service {result.service_rate*100:.0f}%)"
+        )
 
     # Waterfall
     st.subheader("Decomposition financiere")
@@ -860,6 +918,305 @@ def page_history():
         st.rerun()
 
 
+# ─── Marché complet — analyse concurrentielle ────────────────────────────────
+
+def _color_firm(firm: str, user_firm: Optional[str]) -> str:
+    return "#f97316" if firm == user_firm else "#6366f1"
+
+
+def _full_market_ranking_table(firms_data: dict, user_firm: Optional[str]) -> pd.DataFrame:
+    rows = []
+    for rank, (firm, d) in enumerate(
+        sorted(firms_data.items(), key=lambda x: -x[1]["market_share"]), start=1
+    ):
+        marg = d["margin_estimate"]
+        marg_icon = "🟢" if marg >= 0.05 else ("🟡" if marg >= 0.02 else "🔴")
+        rows.append({
+            "Rang": rank,
+            "Firme": f"⭐ {firm}" if firm == user_firm else firm,
+            "PDM (%)": f"{d['market_share']*100:.1f}%",
+            "Ventes (u.)": f"{d['total_sales']:,}",
+            "CA estime ($)": f"{d['total_revenue']:,.0f}",
+            "Profit estime ($)": f"{d['profit_estimate']:,.0f}",
+            f"Marge": f"{marg_icon} {marg*100:.1f}%",
+        })
+    return pd.DataFrame(rows)
+
+
+def _display_full_market_period(mkt: dict):
+    """Display one-period full-market result."""
+    user_firm = mkt.get("user_firm")
+    firms_data = mkt["firms"]
+    seg_labels = {k: v["label"] for k, v in CFG["segments"].items()}
+
+    # ── KPIs ──────────────────────────────────────────────────────────────────
+    total_mkt = mkt["total_market"]
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Marche total", f"{total_mkt:,.0f} unites")
+    if user_firm and user_firm in firms_data:
+        ud = firms_data[user_firm]
+        rank = sorted(firms_data, key=lambda f: -firms_data[f]["market_share"]).index(user_firm) + 1
+        m2.metric(f"{user_firm} — PDM", f"{ud['market_share']*100:.1f}%", delta=f"Rang {rank}/9")
+        m3.metric(f"{user_firm} — CA", f"{ud['total_revenue']:,.0f} $")
+        m4.metric(f"{user_firm} — Marge est.", f"{ud['margin_estimate']*100:.1f}%")
+
+    st.markdown("---")
+
+    # ── Classement ────────────────────────────────────────────────────────────
+    st.subheader("📋 Classement des firmes")
+    df_rank = _full_market_ranking_table(firms_data, user_firm)
+    st.dataframe(df_rank, use_container_width=True, hide_index=True)
+
+    # ── Charts: PDM pie + CA bar ───────────────────────────────────────────────
+    col_pie, col_bar = st.columns(2)
+    sorted_firms = sorted(firms_data.items(), key=lambda x: -x[1]["market_share"])
+
+    with col_pie:
+        fig_pie = go.Figure(go.Pie(
+            labels=[f[0] for f in sorted_firms],
+            values=[f[1]["market_share"] * 100 for f in sorted_firms],
+            marker_colors=[_color_firm(f[0], user_firm) for f in sorted_firms],
+            hole=0.35,
+            textinfo="label+percent",
+        ))
+        fig_pie.update_layout(title="Parts de marche totales (%)", height=370, showlegend=False)
+        st.plotly_chart(fig_pie, use_container_width=True, key="fm_pie")
+
+    with col_bar:
+        sorted_ca = sorted(firms_data.items(), key=lambda x: -x[1]["total_revenue"])
+        fig_bar = go.Figure(go.Bar(
+            x=[f[0] for f in sorted_ca],
+            y=[f[1]["total_revenue"] for f in sorted_ca],
+            marker_color=[_color_firm(f[0], user_firm) for f in sorted_ca],
+            text=[f"{f[1]['total_revenue']/1e6:.1f}M$" for f in sorted_ca],
+            textposition="outside",
+        ))
+        fig_bar.update_layout(title="CA estime par firme ($)", height=370, showlegend=False)
+        st.plotly_chart(fig_bar, use_container_width=True, key="fm_bar")
+
+    # ── Segment heatmap ────────────────────────────────────────────────────────
+    st.subheader("🗺️ PDM par segment x firme (%)")
+    seg_keys = list(mkt["segment_breakdown"].keys())
+    firm_keys = [f[0] for f in sorted(firms_data.items(), key=lambda x: -x[1]["market_share"])]
+
+    heatmap_rows = []
+    for seg_key in seg_keys:
+        row = {"Segment": seg_labels.get(seg_key, seg_key)}
+        leader = mkt["segment_leaders"].get(seg_key, "")
+        for fk in firm_keys:
+            share_pct = mkt["segment_breakdown"][seg_key].get(fk, {}).get("segment_share", 0) * 100
+            row[fk] = round(share_pct, 1)
+        row["Leader"] = leader
+        heatmap_rows.append(row)
+
+    df_heat = pd.DataFrame(heatmap_rows).set_index("Segment")
+    # Highlight user firm column
+    numeric_cols = [c for c in df_heat.columns if c != "Leader"]
+    st.dataframe(
+        df_heat[numeric_cols].style.format("{:.1f}%"),
+        use_container_width=True,
+    )
+
+    # Leader summary
+    st.caption("**Leaders par segment :** " + " | ".join(
+        f"{seg_labels.get(sk, sk)}: **{ldr}**"
+        for sk, ldr in mkt["segment_leaders"].items()
+    ))
+
+
+def _display_full_market_evolution(all_periods: list, user_firm: Optional[str]):
+    """Display PDM and revenue evolution across all 8 periods."""
+    seg_labels = {k: v["label"] for k, v in CFG["segments"].items()}
+    years = [p["year"] for p in all_periods]
+    firm_keys = list(all_periods[0]["firms"].keys())
+
+    st.subheader("📈 Evolution des parts de marche sur 8 periodes")
+
+    # PDM evolution line chart
+    fig_evo = go.Figure()
+    for firm in firm_keys:
+        pdm_series = [p["firms"][firm]["market_share"] * 100 for p in all_periods]
+        fig_evo.add_trace(go.Scatter(
+            x=years, y=pdm_series, name=firm, mode="lines+markers",
+            line=dict(width=3 if firm == user_firm else 1.5,
+                      color="#f97316" if firm == user_firm else None),
+        ))
+    fig_evo.update_layout(
+        title="PDM totale par firme (%)", height=420,
+        xaxis_title="Annee", yaxis_title="PDM (%)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    st.plotly_chart(fig_evo, use_container_width=True, key="fm_evo_pdm")
+
+    # Market size + total revenue evolution
+    col_e1, col_e2 = st.columns(2)
+    with col_e1:
+        mkt_sizes = [p["total_market"] for p in all_periods]
+        fig_mkt = go.Figure(go.Bar(x=years, y=mkt_sizes, marker_color="#6366f1",
+                                   text=[f"{v/1000:.0f}k" for v in mkt_sizes],
+                                   textposition="outside"))
+        fig_mkt.update_layout(title="Taille totale du marche (unites)", height=320)
+        st.plotly_chart(fig_mkt, use_container_width=True, key="fm_evo_mkt")
+
+    with col_e2:
+        if user_firm:
+            rev_series = [p["firms"][user_firm]["total_revenue"] for p in all_periods]
+            margin_series = [p["firms"][user_firm]["margin_estimate"] * 100 for p in all_periods]
+            fig_rev = go.Figure()
+            fig_rev.add_trace(go.Bar(x=years, y=rev_series, name="CA ($)", yaxis="y1",
+                                     marker_color="#f97316", opacity=0.75))
+            fig_rev.add_trace(go.Scatter(x=years, y=margin_series, name="Marge est. (%)",
+                                         yaxis="y2", line=dict(color="#10b981", width=2.5),
+                                         mode="lines+markers"))
+            fig_rev.update_layout(
+                title=f"{user_firm} — CA et marge sur 8 periodes",
+                yaxis=dict(title="CA ($)"),
+                yaxis2=dict(title="Marge (%)", overlaying="y", side="right",
+                            range=[0, max(margin_series) * 1.5 + 1]),
+                height=320,
+                legend=dict(orientation="h"),
+            )
+            st.plotly_chart(fig_rev, use_container_width=True, key="fm_evo_rev")
+
+    # Segment dominance over time for user firm
+    if user_firm:
+        st.subheader(f"🎯 Position de {user_firm} par segment (PDM %)")
+        seg_evo_rows = []
+        for p in all_periods:
+            row = {"Annee": p["year"]}
+            for seg_key in CFG["segments"]:
+                seg_share = p["firms"][user_firm]["segments"].get(seg_key, {}).get("share", 0)
+                row[seg_labels.get(seg_key, seg_key)] = round(seg_share * 100, 1)
+            seg_evo_rows.append(row)
+        df_seg_evo = pd.DataFrame(seg_evo_rows).set_index("Annee")
+        st.dataframe(
+            df_seg_evo.style.format("{:.1f}%"),
+            use_container_width=True,
+        )
+
+
+def page_full_market():
+    st.title("🌍 Analyse du marche complet")
+    st.caption(
+        "9 firmes · 6 segments · 8 periodes — Votre strategie (prix, gamme, marketing) "
+        "s'applique a l'ensemble du marche."
+    )
+
+    # ── Configuration ────────────────────────────────────────────────────────
+    with st.expander("⚙️ Configuration", expanded=True):
+        col_m1, col_m2 = st.columns([1, 3])
+        with col_m1:
+            mode = st.radio(
+                "Mode",
+                ["🏢 Ma firme", "🔭 Neutre"],
+                key="fm_mode",
+            )
+        with col_m2:
+            view = st.radio(
+                "Vue",
+                ["📊 Periode unique", "📈 Evolution 8 periodes"],
+                horizontal=True,
+                key="fm_view",
+            )
+
+        user_firm = None
+        user_scenario = None
+
+        if mode == "🏢 Ma firme":
+            st.markdown("---")
+            cf1, cf2, cf3, cf4, cf5 = st.columns(5)
+            with cf1:
+                user_firm = st.selectbox("Firme", FIRM_OPTIONS,
+                                         index=FIRM_OPTIONS.index("TRE"), key="fm_firm")
+            with cf2:
+                fm_rng_lbl = st.selectbox("Gamme", list(RANGE_OPTIONS.keys()),
+                                          index=1, key="fm_range")
+                fm_rng_key = RANGE_OPTIONS[fm_rng_lbl]
+            with cf3:
+                bounds = CFG["ranges"][fm_rng_key]["price_range"]
+                fm_price = st.slider("Prix ($)",
+                                     int(bounds[0] * 0.80), int(bounds[1] * 1.20),
+                                     int(sum(bounds) / 2), step=50, key="fm_price")
+            with cf4:
+                fm_mkt = st.slider("Budget marketing ($)",
+                                   0, 500_000, 80_000, step=5_000, key="fm_mkt")
+            with cf5:
+                fm_promo = st.slider("Promotion (%)", -10.0, 0.0, 0.0,
+                                     step=1.0, key="fm_promo")
+
+            fm_adj = max(CFG["firms"][user_firm]["units_ref"] * float(fm_price), 100_000.0)
+
+            # Shared template — period overridden per-period in all_periods mode
+            user_scenario = ScenarioInput(
+                firm_name=user_firm,
+                period=1,
+                scenario_name=f"{user_firm} marche complet",
+                model_name=f"{user_firm} modele",
+                segment="urbains_presses",   # overridden per segment inside simulate_full_market
+                model_range=fm_rng_key,
+                product_status="active",
+                price=float(fm_price),
+                production=CFG["firms"][user_firm]["units_ref"],
+                marketing_budget=float(fm_mkt),
+                adjusted_budget=fm_adj,
+                promotion_rate=float(fm_promo) / 100.0,
+                previous_innovation_score=CFG["firms"][user_firm].get("base_rep", 5.0),
+            )
+
+        if view == "📊 Periode unique":
+            period = st.selectbox("Periode", list(range(1, 9)), key="fm_period_single")
+        else:
+            period = None  # will run all 8
+
+    # ── Simulation ────────────────────────────────────────────────────────────
+    btn_label = "📊 Analyser cette periode" if view == "📊 Periode unique" else "📈 Analyser les 8 periodes"
+    if st.button(btn_label, type="primary", key="fm_run"):
+        if view == "📊 Periode unique":
+            with st.spinner(f"Simulation P{period} — 9 firmes x 6 segments..."):
+                if user_scenario:
+                    scenario_p = user_scenario.model_copy(update={"period": period})
+                else:
+                    scenario_p = None
+                mkt = simulate_full_market(period, user_firm, scenario_p)
+            st.subheader(f"Periode {mkt['period']} — Annee {mkt['year']}")
+            _display_full_market_period(mkt)
+
+        else:
+            with st.spinner("Simulation 8 periodes x 9 firmes x 6 segments..."):
+                all_periods = simulate_full_market_all_periods(user_firm, user_scenario)
+            st.subheader(f"Marche complet — 2027 a 2034")
+            # Show final period ranking
+            st.markdown("**Classement final (Periode 8 — 2034)**")
+            df_final = _full_market_ranking_table(all_periods[-1]["firms"], user_firm)
+            st.dataframe(df_final, use_container_width=True, hide_index=True)
+            st.markdown("---")
+            _display_full_market_evolution(all_periods, user_firm)
+
+
+# ─── Calculateur rapide (React embarque) ──────────────────────────────────────
+
+def page_calculateur():
+    st.title("🧮 Calculateur rapide")
+    st.caption(
+        "Outil de decision instantane : ajustez les sliders et observez les resultats en temps reel. "
+        "Aucune simulation complete necessaire."
+    )
+
+    html_path = pathlib.Path(__file__).parent / "calculateur.html"
+    if not html_path.exists():
+        st.error(
+            "Fichier calculateur.html introuvable. "
+            "Assurez-vous qu'il est present a la racine du projet."
+        )
+        return
+
+    html_content = html_path.read_text(encoding="utf-8")
+
+    # Supprimer le header et le body wrapper pour l'integration dans Streamlit
+    # On embarque uniquement le contenu utile dans un iframe via components.html
+    components.html(html_content, height=820, scrolling=True)
+
+
 # ─── Sidebar navigation ───────────────────────────────────────────────────────
 
 def main():
@@ -877,6 +1234,8 @@ def main():
                 "🔬 Simulation directe",
                 "📊 Multi-scenarios",
                 "🎯 Objectif cible",
+                "🌍 Marche complet",
+                "🧮 Calculateur rapide",
                 "📁 Historique",
             ],
             key="nav_page",
@@ -896,9 +1255,12 @@ def main():
         page_multi_scenario()
     elif page == "🎯 Objectif cible":
         page_objective_mode()
+    elif page == "🌍 Marche complet":
+        page_full_market()
+    elif page == "🧮 Calculateur rapide":
+        page_calculateur()
     elif page == "📁 Historique":
         page_history()
 
 
-if __name__ == "__main__":
-    main()
+main()
