@@ -5,6 +5,9 @@ severity: "error" | "warning" | "info"
 """
 from typing import List, Tuple
 from config.market_config import MARKET_CONFIG
+from rules.price_rules import check_price_range_consistency
+from rules.promo_rules import validate_promo_rate
+from rules.withdrawal_rules import check_withdrawal_limits
 
 Alert = Tuple[str, str]   # (severity, message)
 
@@ -13,7 +16,6 @@ def validate_scenario(scenario) -> List[Alert]:
     """Run all business rule checks against a ScenarioInput. Returns list of alerts."""
     alerts: List[Alert] = []
     cfg = MARKET_CONFIG["constraints"]
-    ranges_cfg = MARKET_CONFIG["ranges"]
 
     # ── Budget caps ──────────────────────────────────────────────────────────
     mkt_max = scenario.adjusted_budget * cfg["marketing_max_pct"]
@@ -33,47 +35,16 @@ def validate_scenario(scenario) -> List[Alert]:
         ))
 
     # ── Promotion limits ─────────────────────────────────────────────────────
-    if scenario.liquidation:
-        if scenario.promotion_rate < cfg["promo_liquidation_max"]:
-            alerts.append((
-                "error",
-                f"Promotion de liquidation ({scenario.promotion_rate*100:.1f}%) depasse le maximum "
-                f"autorise de -10 %. Reduction maximale en liquidation : 10 %.",
-            ))
-    else:
-        if scenario.promotion_rate < cfg["promo_standard_max"]:
-            alerts.append((
-                "error",
-                f"Promotion standard ({scenario.promotion_rate*100:.1f}%) depasse le maximum "
-                f"autorise de -5 %. Utilisez le mode liquidation pour aller jusqu'a -10 %.",
-            ))
+    promo_ok, promo_msg = validate_promo_rate(scenario.promotion_rate)
+    if not promo_ok:
+        alerts.append(("error", promo_msg))
 
     # ── Price vs range coherence (with severity threshold) ───────────────────
-    price_min, price_max = ranges_cfg[scenario.model_range]["price_range"]
-    range_label = MARKET_CONFIG["ranges"][scenario.model_range]["label"]
-
-    if not (price_min <= scenario.price <= price_max):
-        # Compute deviation from nearest bound
-        if scenario.price < price_min:
-            deviation = (price_min - scenario.price) / price_min
-        else:
-            deviation = (scenario.price - price_max) / price_max
-
-        if deviation > cfg["price_coherence_error_pct"]:
-            severity = "error"
-            detail = f"Ecart de {deviation*100:.0f}% > seuil d'erreur ({cfg['price_coherence_error_pct']*100:.0f}%)."
-        elif deviation > cfg["price_coherence_warning_pct"]:
-            severity = "warning"
-            detail = f"Ecart de {deviation*100:.0f}% > seuil d'alerte ({cfg['price_coherence_warning_pct']*100:.0f}%)."
-        else:
-            severity = "warning"
-            detail = f"Ecart de {deviation*100:.0f}% (dans la tolerance de 10%)."
-
-        alerts.append((
-            severity,
-            f"Prix ({scenario.price:,.0f} $) incohérent avec la gamme '{range_label}' "
-            f"(plage recommandee : {price_min:,} - {price_max:,} $). {detail}",
-        ))
+    consistency, consistency_msg = check_price_range_consistency(scenario.price, scenario.model_range)
+    if consistency == "error":
+        alerts.append(("error", consistency_msg))
+    elif consistency == "warning":
+        alerts.append(("warning", consistency_msg))
 
     # ── Liquidation → next period production = 0 ────────────────────────────
     if scenario.liquidation:
@@ -109,31 +80,15 @@ def validate_scenario(scenario) -> List[Alert]:
 
     # ── Withdrawal limit rules ───────────────────────────────────────────────
     if scenario.withdraw_model:
-        max_total = cfg["withdrawal_max_total"]
-        min_gap = cfg["withdrawal_min_periods_between"]
-
-        if scenario.total_withdrawals_used >= max_total:
-            alerts.append((
-                "error",
-                f"Limite de retraits atteinte : {max_total} retraits maximum sur la simulation. "
-                f"Vous en avez deja utilise {scenario.total_withdrawals_used}.",
-            ))
-        elif scenario.last_withdrawal_period > 0:
-            gap = scenario.period - scenario.last_withdrawal_period
-            if gap < min_gap:
-                alerts.append((
-                    "error",
-                    f"Delai entre retraits insuffisant : minimum {min_gap} periodes requises "
-                    f"(dernier retrait P{scenario.last_withdrawal_period}, periode actuelle P{scenario.period}, "
-                    f"ecart = {gap} periode(s)).",
-                ))
-
-        remaining = max_total - scenario.total_withdrawals_used - (1 if scenario.withdraw_model else 0)
-        if scenario.total_withdrawals_used < max_total:
-            alerts.append((
-                "info",
-                f"Retrait planifie. Retraits restants apres cette periode : {remaining}/{max_total}.",
-            ))
+        history = {scenario.firm_name: [scenario.last_withdrawal_period] if scenario.last_withdrawal_period else []}
+        allowed, message = check_withdrawal_limits(
+            scenario.firm_name,
+            scenario.period,
+            history,
+            max_per_year=1,
+            max_total=cfg["withdrawal_max_total"],
+        )
+        alerts.append(("error" if not allowed else "info", message))
 
     # ── Product status / commercial consistency ──────────────────────────────
     if scenario.product_status in ("development", "inactive"):

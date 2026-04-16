@@ -188,6 +188,19 @@ class SimulationResult(BaseModel):
     alerts: List[str]
     interpretations: List[str]
 
+    # Extended business indicators
+    profit_rate: float = 0.0
+    profit_rate_status: str = "faible"
+    price_range_consistency_status: str = "unknown"
+    marketing_efficiency: float = 0.0
+    marketing_marginal_profit_delta: float = 0.0
+    production_efficiency: float = 0.0
+    next_period_recommended_production: int = 0
+    new_product_first_year_flag: bool = False
+    withdrawal_limit_status: str = "ok"
+    liquidation_next_period_production_flag: bool = False
+    baseline_2026_indicator: float = 0.0
+
 
 class OptimizationResult(BaseModel):
     success: bool

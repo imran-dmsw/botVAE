@@ -9,6 +9,8 @@ from typing import Optional, Sequence
 
 from engine.models import ScenarioInput, SimulationResult
 from config.market_config import MARKET_CONFIG
+from reporting.baseline_2026 import build_2026_baseline_summary
+from reporting.recommendation_engine import build_recommendations
 
 
 # ─── Markdown / text report ───────────────────────────────────────────────────
@@ -38,6 +40,7 @@ def generate_markdown_report(scenario: ScenarioInput, result: SimulationResult) 
     rd_max = scenario.adjusted_budget * MARKET_CONFIG["constraints"]["rd_max_pct"]
 
     status_icon = "✅" if result.is_valid else "❌"
+    baseline_2026 = build_2026_baseline_summary(scenario, result)
 
     lines = [
         f"# Rapport de simulation VAE",
@@ -55,6 +58,7 @@ def generate_markdown_report(scenario: ScenarioInput, result: SimulationResult) 
         f"| Ventes | {result.sales:,} unités |",
         f"| Chiffre d'affaires | {result.revenue:,.0f} $ |",
         f"| Profit | {result.profit:,.0f} $ |",
+        f"| Profit rate | {result.profit_rate*100:.2f}% ({result.profit_rate_status}) |",
         f"| Marge | {result.margin*100:.1f}% |",
         f"| Part de marché totale | {result.market_share*100:.2f}% |",
         f"| Part de marché segment ({seg_label}) | {result.market_share_segment*100:.2f}% |",
@@ -115,7 +119,19 @@ def generate_markdown_report(scenario: ScenarioInput, result: SimulationResult) 
         "",
         "---",
         "",
-        "## 5. Analyse et interprétation",
+        "## 5. Controles metier",
+        "",
+        f"- Cohérence prix/gamme : **{result.price_range_consistency_status}**",
+        f"- Promo valide : **{'oui' if scenario.promotion_rate in (0.0, -0.02, -0.03, -0.04, -0.05, -0.10) else 'non'}**",
+        f"- Profit cible 5-10% : **{'oui' if 0.05 <= result.profit_rate <= 0.10 else 'non'}**",
+        f"- Efficacite marketing : **{result.marketing_efficiency:.4f} ventes/$**",
+        f"- Efficacite production : **{result.production_efficiency*100:.1f}%**",
+        f"- Production recommandee N+1 : **{result.next_period_recommended_production:,}**",
+        f"- Limite retrait produit : **{result.withdrawal_limit_status}**",
+        "",
+        "---",
+        "",
+        "## 6. Analyse et interprétation",
         "",
     ]
 
@@ -126,10 +142,21 @@ def generate_markdown_report(scenario: ScenarioInput, result: SimulationResult) 
         "",
         "---",
         "",
-        "## 6. Recommandations",
+        "## 7. Reference 2026",
+        "",
+        f"- Taille du marche 2026: **{baseline_2026['market_size_2026']:,}** unites",
+        f"- Baseline prix 2026: **{baseline_2026['baseline_price_2026']:,.0f} $**",
+        f"- Baseline part de marche firme: **{baseline_2026['baseline_market_share_2026']*100:.2f}%**",
+        f"- Baseline rentabilite: **{baseline_2026['baseline_profitability_2026']*100:.2f}%**",
+        f"- Delta CA scenario vs baseline: **{baseline_2026['scenario_vs_baseline_revenue_delta']:,.0f} $**",
+        "",
+        "---",
+        "",
+        "## 8. Recommandations",
         "",
     ]
-    lines += _generate_recommendations(scenario, result)
+    for rec in build_recommendations(scenario, result):
+        lines.append(f"- {rec}")
 
     lines += [
         "",

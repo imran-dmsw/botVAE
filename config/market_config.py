@@ -381,4 +381,21 @@ MARKET_CONFIG = {
             "sustainability": 0.05, "design": 0.04, "brand": 0.03,
         },
     },
+
+    # ── Plan d'action 2026/2027 (tests structurés) ───────────────────────────
+    "plan_2026": {
+        # Seuils d'entree
+        "price_coherence_reference": {"warning_pct": 0.10, "error_pct": 0.20},
+        "promotion_test_rates": [0.0, -0.02, -0.03, -0.04, -0.05, -0.10],
+        "marketing_yield_rates": [0.00, 0.05, 0.10],
+        "profit_target_band": [0.05, 0.10],
+        "new_product_first_year_units": [1000, 2000],
+
+        # Politiques de renouvellement
+        # A: maximum 1 lancement/an ; B: un lancement toutes les 2 periodes.
+        "renewal_policies": {
+            "A_max_one_per_year": {"launch_periods": [1, 3, 5, 7]},
+            "B_every_two_periods": {"launch_periods": [2, 4, 6, 8]},
+        },
+    },
 }

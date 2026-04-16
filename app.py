@@ -21,6 +21,15 @@ from engine.simulation import (
     simulate_full_market, simulate_full_market_all_periods, suggest_next_production,
 )
 from engine.optimizer import find_parameters_for_target, SUPPORTED_METRICS
+from engine.plan_executor import execute_plan_matrix, runs_to_dataframe, compare_policies
+from simulation.multi_scenario_runner import (
+    run_all_scenarios,
+    compare_scenarios as compare_auto_scenarios,
+    run_promo_sales_test,
+    run_marketing_short_term_test,
+)
+from simulation.full_market_runner import run_full_market_simulation
+from reporting.recommendation_engine import generate_recommendations
 from reports.generator import (
     generate_markdown_report,
     generate_word_report,
@@ -831,6 +840,9 @@ def page_objective_mode():
     with col_obj3:
         tolerance = st.slider("Tolerance (%)", 1, 20, 5, key="opt_tolerance") / 100.0
         max_iter = st.select_slider("Precision", [100, 200, 300, 500], value=300, key="opt_maxiter")
+        if st.button("🎯 Objectif rapide 8% profit", key="opt_quick_8"):
+            st.session_state["opt_metric_lbl"] = SUPPORTED_METRICS["margin"]
+            st.session_state["opt_target_pct"] = 8.0
 
     if st.button("🔍 Rechercher les parametres optimaux", type="primary", use_container_width=True):
         try:
@@ -1217,6 +1229,262 @@ def page_calculateur():
     components.html(html_content, height=820, scrolling=True)
 
 
+def page_action_plan_2026():
+    st.title("🧭 Plan d'action 2026")
+    st.caption(
+        "Execution automatique du plan : promos, rendement marketing, multi-marches "
+        "et comparaison des politiques de renouvellement."
+    )
+
+    with st.expander("Scenario de reference", expanded=True):
+        scenario_form(key_prefix="plan_")
+
+    if st.button("▶️ Executer le plan complet", type="primary", use_container_width=True):
+        try:
+            base = build_scenario_from_form("plan_")
+            with st.spinner("Execution des scenarios en cours..."):
+                runs = execute_plan_matrix(base)
+            df = runs_to_dataframe(runs)
+            cmp_df = compare_policies(df)
+        except Exception as e:
+            st.error(f"Erreur lors de l'execution du plan : {e}")
+            return
+
+        st.session_state["plan_runs_df"] = df
+        st.session_state["plan_cmp_df"] = cmp_df
+
+    if "plan_runs_df" in st.session_state:
+        df = st.session_state["plan_runs_df"]
+        cmp_df = st.session_state["plan_cmp_df"]
+
+        st.subheader("KPI scenarios")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        st.subheader("Comparaison politique A vs B")
+        st.dataframe(cmp_df, use_container_width=True, hide_index=True)
+
+        best_policy = cmp_df.iloc[0]["Politique"] if not cmp_df.empty else "N/A"
+        st.success(f"Politique recommandee : **{best_policy}** (meilleur couple profit/indice 2026).")
+
+
+def page_auto_scenarios():
+    st.title("🧪 Scenarios automatiques")
+    st.caption("Lance 6 scenarios tests, compare les resultats et affiche alertes + recommandations.")
+
+    with st.expander("Scenario de base", expanded=True):
+        scenario_form(key_prefix="auto_")
+
+    if st.button("🚀 Lancer scenarios test", type="primary", use_container_width=True):
+        try:
+            base = build_scenario_from_form("auto_")
+            outputs = run_all_scenarios(base)
+            cmp_rows = compare_auto_scenarios(outputs)
+            promo_tests = run_promo_sales_test(base)
+            mkt_tests = run_marketing_short_term_test(base)
+            full_market = run_full_market_simulation(base.firm_name, base)
+        except Exception as e:
+            st.error(f"Erreur execution scenarios automatiques: {e}")
+            return
+
+        st.session_state["auto_outputs"] = outputs
+        st.session_state["auto_cmp_rows"] = cmp_rows
+        st.session_state["auto_promo_tests"] = promo_tests
+        st.session_state["auto_mkt_tests"] = mkt_tests
+        st.session_state["auto_full_market"] = full_market
+
+    if "auto_cmp_rows" in st.session_state:
+        cmp_df = pd.DataFrame(st.session_state["auto_cmp_rows"])
+        st.subheader("Comparateur de scenarios")
+        st.dataframe(cmp_df, use_container_width=True, hide_index=True)
+
+        if not cmp_df.empty:
+            best_profit = cmp_df.loc[cmp_df["Profit ($)"].idxmax(), "Scenario"]
+            best_profit_rate = cmp_df.loc[cmp_df["Profit rate (%)"].idxmax(), "Scenario"]
+            st.success(f"🏆 Meilleur scenario profit: **{best_profit}** | profit_rate: **{best_profit_rate}**")
+
+        st.subheader("Alertes metier")
+        for out in st.session_state["auto_outputs"]:
+            if out["alerts"]:
+                with st.expander(f"Alertes - {out['scenario']}", expanded=False):
+                    for alert in out["alerts"][:8]:
+                        st.warning(alert)
+
+        st.subheader("Recommandations")
+        for out in st.session_state["auto_outputs"]:
+            recs = generate_recommendations(out["result"])
+            with st.expander(f"Recommandations - {out['scenario']}", expanded=False):
+                for rec in recs:
+                    st.write(f"- {rec}")
+
+        st.subheader("Test promo (0, -5, -10)")
+        promo_df = pd.DataFrame([{
+            "Label": r.label, "Ventes": r.sales, "Profit ($)": r.profit
+        } for r in st.session_state["auto_promo_tests"] if r.label in ("Taux promotion valide.",)])
+        st.dataframe(promo_df, use_container_width=True, hide_index=True)
+
+        st.subheader("Test marketing (0% -> 10%)")
+        mkt_df = pd.DataFrame([{
+            "Step": r.label,
+            "Ventes": r.sales,
+            "Profit ($)": r.profit,
+            "Profit rate (%)": r.margin * 100,
+            "Efficacite marketing": r.marketing_efficiency,
+        } for r in st.session_state["auto_mkt_tests"]])
+        st.dataframe(mkt_df, use_container_width=True, hide_index=True)
+
+        if not mkt_df.empty:
+            best_roi_idx = mkt_df["Efficacite marketing"].idxmax()
+            best_step = mkt_df.loc[best_roi_idx, "Step"]
+            st.info(f"ROI marketing optimal detecte sur: **{best_step}**")
+
+        st.subheader("Simulation globale (stabilite)")
+        full = st.session_state["auto_full_market"]
+        final = full[-1]
+        total_market = final["total_market"]
+        total_sales = sum(f["total_sales"] for f in final["firms"].values())
+        coherence_gap = abs(total_sales - total_market)
+        st.write(
+            f"- Periodes simulees: **{len(full)}** | Marche final: **{total_market:,.0f}** | "
+            f"Ventes totales firmes: **{total_sales:,.0f}** | Ecart coherence: **{coherence_gap:,.0f}**"
+        )
+
+
+# ─── Sidebar helpers: analyses, conseils, export ─────────────────────────────
+
+PAGE_ANALYSES = {
+    "🔬 Simulation directe": "Analyse un scenario en profondeur (KPI, couts, alertes, plan d'action).",
+    "📊 Multi-scenarios": "Compare plusieurs strategies et identifie le meilleur compromis profit/marge/PDM.",
+    "🎯 Objectif cible": "Recherche automatiquement les parametres qui atteignent une cible metier.",
+    "🧪 Scenarios automatiques": "Lance des tests pedagogiques pour valider les regles metier et les sensibilites.",
+    "🧭 Plan d'action 2026": "Evalue un plan multi-tests et compare les politiques de decision.",
+    "🌍 Marche complet": "Observe la concurrence globale (9 firmes, 6 segments) et l'evolution sur 8 periodes.",
+    "🧮 Calculateur rapide": "Simule rapidement des hypothese sans lancer une simulation complete.",
+    "📁 Historique": "Suit la performance des scenarios enregistres dans le temps.",
+}
+
+PAGE_TIPS = {
+    "🔬 Simulation directe": [
+        "Validez d'abord la marge (>=2%), puis optimisez la part de marche.",
+        "Ajustez 1-2 variables a la fois pour isoler les effets.",
+    ],
+    "📊 Multi-scenarios": [
+        "Conservez une base commune pour comparer proprement les scenarios.",
+        "Ne retenez pas seulement le profit: regardez aussi service et robustesse.",
+    ],
+    "🎯 Objectif cible": [
+        "Fixez une tolerance realiste (5-10%) pour converger plus vite.",
+        "Verifiez que la solution recommandee reste conforme aux contraintes metier.",
+    ],
+    "🧪 Scenarios automatiques": [
+        "Utilisez cette vue pour detecter rapidement les zones de risque.",
+        "Appuyez vos decisions sur les recommandations par scenario.",
+    ],
+    "🧭 Plan d'action 2026": [
+        "Comparez les politiques par couple profit/indice pour un choix robuste.",
+        "Rejouez le plan apres chaque ajustement important du scenario de base.",
+    ],
+    "🌍 Marche complet": [
+        "Testez plusieurs niveaux de prix pour mesurer la reaction concurrentielle.",
+        "Surveillez votre rang et votre marge sur toute la trajectoire 8 periodes.",
+    ],
+    "🧮 Calculateur rapide": [
+        "Utilisez cette vue pour pre-qualifier des hypotheses avant simulation detaillee.",
+        "Confirmez ensuite les decisions avec Simulation directe ou Multi-scenarios.",
+    ],
+    "📁 Historique": [
+        "Reperez les tendances de marge et PDM avant de changer la strategie.",
+        "Nettoyez les scenarios obsoletes pour garder un historique lisible.",
+    ],
+}
+
+
+def _sidebar_pdf_export_for_page(page: str):
+    st.markdown("**Rapport PDF**")
+    try:
+        if page == "🔬 Simulation directe":
+            scenario = st.session_state.get("last_scenario")
+            result = st.session_state.get("last_result")
+            if scenario and result:
+                pdf_bytes = generate_pdf_report(scenario, result)
+                st.download_button(
+                    "📑 Exporter PDF (simulation)",
+                    data=pdf_bytes,
+                    file_name=f"rapport_{result.scenario_name.replace(' ', '_')}.pdf",
+                    mime="application/pdf",
+                    key="sidebar_pdf_single",
+                    use_container_width=True,
+                )
+            else:
+                st.caption("Lancez une simulation pour activer l'export PDF.")
+
+        elif page == "📊 Multi-scenarios":
+            scenarios = st.session_state.get("multi_scenarios", [])
+            results = st.session_state.get("multi_results", [])
+            if scenarios and results:
+                pdf_bytes = generate_multi_pdf_report(scenarios, results)
+                st.download_button(
+                    "📑 Exporter PDF global",
+                    data=pdf_bytes,
+                    file_name="rapport_multi_scenarios.pdf",
+                    mime="application/pdf",
+                    key="sidebar_pdf_multi",
+                    use_container_width=True,
+                )
+            else:
+                st.caption("Lancez la comparaison pour activer l'export PDF.")
+
+        elif page == "🎯 Objectif cible":
+            opt = st.session_state.get("opt_result")
+            if opt and getattr(opt, "recommended_scenario", None) and getattr(opt, "simulation_result", None):
+                pdf_bytes = generate_pdf_report(opt.recommended_scenario, opt.simulation_result)
+                st.download_button(
+                    "📑 Exporter PDF (objectif)",
+                    data=pdf_bytes,
+                    file_name=f"rapport_objectif_{opt.simulation_result.scenario_name.replace(' ', '_')}.pdf",
+                    mime="application/pdf",
+                    key="sidebar_pdf_objective",
+                    use_container_width=True,
+                )
+            else:
+                st.caption("Lancez une optimisation pour activer l'export PDF.")
+
+        elif page == "🧪 Scenarios automatiques":
+            outputs = st.session_state.get("auto_outputs", [])
+            if outputs:
+                scenarios = [o["scenario_input"] for o in outputs if "scenario_input" in o and "result" in o]
+                results = [o["result"] for o in outputs if "scenario_input" in o and "result" in o]
+                if scenarios and results:
+                    pdf_bytes = generate_multi_pdf_report(scenarios, results)
+                    st.download_button(
+                        "📑 Exporter PDF scenarios auto",
+                        data=pdf_bytes,
+                        file_name="rapport_scenarios_automatiques.pdf",
+                        mime="application/pdf",
+                        key="sidebar_pdf_auto",
+                        use_container_width=True,
+                    )
+                else:
+                    st.caption("Aucun resultat exportable detecte.")
+            else:
+                st.caption("Lancez les scenarios automatiques pour activer l'export PDF.")
+        else:
+            st.caption("Export PDF non disponible sur cette page.")
+    except Exception as e:
+        st.caption(f"PDF indisponible: {e}")
+
+
+def _render_sidebar_context(page: str):
+    with st.sidebar.expander("🧠 Analyse du module", expanded=True):
+        st.write(PAGE_ANALYSES.get(page, "Analyse non disponible pour cette section."))
+
+    with st.sidebar.expander("💡 Conseils rapides", expanded=False):
+        for tip in PAGE_TIPS.get(page, []):
+            st.write(f"- {tip}")
+
+    with st.sidebar.expander("📥 Export PDF des rapports", expanded=False):
+        _sidebar_pdf_export_for_page(page)
+
+
 # ─── Sidebar navigation ───────────────────────────────────────────────────────
 
 def main():
@@ -1234,6 +1502,8 @@ def main():
                 "🔬 Simulation directe",
                 "📊 Multi-scenarios",
                 "🎯 Objectif cible",
+                "🧪 Scenarios automatiques",
+                "🧭 Plan d'action 2026",
                 "🌍 Marche complet",
                 "🧮 Calculateur rapide",
                 "📁 Historique",
@@ -1248,6 +1518,7 @@ def main():
         st.caption("• Promo liquidation <= -20%")
         st.caption("• Profit min. >= 2% du CA")
         _show_market_overview()
+        _render_sidebar_context(page)
 
     if page == "🔬 Simulation directe":
         page_single_simulation()
@@ -1255,6 +1526,10 @@ def main():
         page_multi_scenario()
     elif page == "🎯 Objectif cible":
         page_objective_mode()
+    elif page == "🧪 Scenarios automatiques":
+        page_auto_scenarios()
+    elif page == "🧭 Plan d'action 2026":
+        page_action_plan_2026()
     elif page == "🌍 Marche complet":
         page_full_market()
     elif page == "🧮 Calculateur rapide":

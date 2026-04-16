@@ -24,6 +24,15 @@ from typing import List, Optional
 from config.market_config import MARKET_CONFIG
 from engine.models import ScenarioInput, SimulationResult
 from engine.rules import validate_scenario
+from reporting.baseline_2026 import build_2026_baseline_summary
+from rules.marketing_rules import marketing_efficiency, profit_rate_status
+from rules.price_rules import check_price_range_consistency, price_range_penalty_multiplier
+from rules.product_lifecycle_rules import (
+    apply_new_product_first_year_sales_cap,
+    liquidation_next_period_production_flag,
+)
+from rules.production_rules import production_efficiency, recommend_next_period_production
+from rules.withdrawal_rules import check_withdrawal_limits
 
 
 # ─── Market size helpers ──────────────────────────────────────────────────────
@@ -91,6 +100,7 @@ def calc_attractiveness(s: ScenarioInput) -> float:
         * innovation_bonus
         * sustainability_bonus
     )
+    attractiveness *= price_range_penalty_multiplier(s.price, s.model_range)
 
     return max(attractiveness, 0.0)
 
@@ -165,6 +175,39 @@ def suggest_next_production(scenario: ScenarioInput, result: SimulationResult) -
         suggested = int(demand * 0.95)   # oversupplied: reduce to near-demand
 
     return max(suggested, 0)
+
+
+def build_next_period_scenario(
+    previous_scenario: ScenarioInput,
+    previous_result: SimulationResult,
+    *,
+    next_period: Optional[int] = None,
+    new_model_launch: Optional[bool] = None,
+) -> ScenarioInput:
+    """
+    Build a coherent N+1 scenario from period N outcome.
+
+    Applied rules:
+    - Liquidation/withdrawal in N => production = 0 in N+1.
+    - Otherwise, production is suggested from demand/service in N.
+    - period increments by 1 (or uses provided next_period).
+    """
+    target_period = next_period if next_period is not None else previous_scenario.period + 1
+    suggested = suggest_next_production(previous_scenario, previous_result)
+    launch_flag = previous_scenario.new_model_launch if new_model_launch is None else new_model_launch
+
+    return previous_scenario.model_copy(
+        update={
+            "period": target_period,
+            "production": suggested,
+            "new_model_launch": launch_flag,
+            "previous_innovation_score": previous_result.innovation_score,
+            "previous_sustainability_score": previous_result.sustainability_score,
+            # New period baseline: no liquidation unless explicitly re-triggered.
+            "liquidation": False,
+            "withdraw_model": False,
+        }
+    )
 
 
 # ─── Reference scenario for full-market simulation ───────────────────────────
@@ -489,6 +532,14 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
 
     # Sales capped by production
     sales = min(int(demand), scenario.production)
+    sales, was_capped, cap_msg = apply_new_product_first_year_sales_cap(
+        sales,
+        is_new_product_first_year=(scenario.new_model_launch or scenario.product_status == "pre_launch"),
+        min_units=MARKET_CONFIG["constraints"]["new_product_min_units"],
+        max_units=MARKET_CONFIG["constraints"]["new_product_max_units"],
+    )
+    if was_capped:
+        all_alerts.append(cap_msg)
     service_rate = sales / max(demand, 1.0)
 
     # Production alerts
@@ -563,6 +614,61 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
         unit_cost=unit_cost,
     )
 
+    # ── Extended business indicators ──────────────────────────────────────────
+    profit_rate = profit / max(revenue, 1.0)
+    consistency_status, consistency_msg = check_price_range_consistency(scenario.price, scenario.model_range)
+    if consistency_status != "ok":
+        all_alerts.append(consistency_msg)
+
+    mkt_eff = marketing_efficiency(sales, scenario.marketing_budget)
+    prod_eff = production_efficiency(sales, scenario.production)
+    next_prod, next_prod_expl = recommend_next_period_production(
+        sales_n=sales,
+        stock_final_n=max(scenario.production - sales, 0),
+        market_trend=MARKET_CONFIG["growth_rate"],
+        product_status=scenario.product_status,
+        adjustment_factor=1.10,
+    )
+    if scenario.liquidation:
+        next_prod = 0
+        next_prod_expl = "Mode liquidation: production N+1 forcee a 0."
+    interpretations.append(next_prod_expl)
+    w_ok, w_msg = check_withdrawal_limits(
+        scenario.firm_name,
+        scenario.period,
+        {scenario.firm_name: [scenario.last_withdrawal_period] if scenario.last_withdrawal_period else []},
+    )
+    if not w_ok:
+        all_alerts.append(w_msg)
+
+    baseline_summary = build_2026_baseline_summary(scenario, SimulationResult(
+        firm_name=scenario.firm_name,
+        period=scenario.period,
+        scenario_name=scenario.scenario_name,
+        demand=demand,
+        sales=sales,
+        service_rate=service_rate,
+        revenue=revenue,
+        production_cost=production_cost,
+        distribution_cost=distribution_cost,
+        marketing_cost=marketing_cost,
+        rd_cost=rd_cost,
+        operating_cost=operating_cost,
+        aftersales_cost=aftersales_cost,
+        sustainability_cost=sustainability_cost,
+        total_cost=total_cost,
+        profit=profit,
+        margin=margin,
+        market_share=market_share_total,
+        market_share_segment=market_share_segment,
+        innovation_score=innovation_score,
+        sustainability_score=sustainability_score,
+        attractiveness=attractiveness,
+        is_valid=is_valid,
+        alerts=[],
+        interpretations=[],
+    ))
+
     return SimulationResult(
         firm_name=scenario.firm_name,
         period=scenario.period,
@@ -589,6 +695,19 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
         is_valid=is_valid,
         alerts=all_alerts,
         interpretations=interpretations,
+        profit_rate=profit_rate,
+        profit_rate_status=profit_rate_status(profit_rate),
+        price_range_consistency_status=consistency_status,
+        marketing_efficiency=mkt_eff,
+        marketing_marginal_profit_delta=0.0,
+        production_efficiency=prod_eff,
+        next_period_recommended_production=next_prod,
+        new_product_first_year_flag=(scenario.new_model_launch or scenario.product_status == "pre_launch"),
+        withdrawal_limit_status="ok" if w_ok else "blocked",
+        liquidation_next_period_production_flag=liquidation_next_period_production_flag(
+            scenario.product_status, scenario.liquidation
+        ),
+        baseline_2026_indicator=baseline_summary["baseline_market_share_2026"] * 100,
     )
 
 
