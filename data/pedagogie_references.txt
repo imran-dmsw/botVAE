@@ -1,0 +1,41 @@
+Références — paquet VAE (téléchargements typiques de l’équipe enseignante)
+========================================================================
+
+Fichiers cités par les formateurs (noms peuvent inclure des suffixes du type [40], [71] selon le navigateur) :
+
+1) Simulation VAE 12032026 Final.pdf
+   - Document de cours / consignes globales sur la simulation VAE.
+
+2) VAE_tout_inclus_12_03_2026_ajuste_periodes final.xlsx
+   - Chiffrier « tout inclus » version mars 2026 (antérieur au classeur mai 2026).
+   - Les constantes Python dans config/market_config.py suivent le classeur mai 2026
+     (VAE_tout_inclus_01_05_2026_Final1.xlsx) sauf décision contraire documentée
+     dans data/chiffrier_sync_notes.txt.
+
+3) Fiche_saisie_equipes_simulation_VAE_ Final.xlsx
+   - Grille de saisie par équipe en parallèle du moteur Excel « tout inclus ».
+
+4) Décisions à prendre par les étudiants à chaque période.docx
+   - Liste des choix à poser chaque période ; correspondance avec le bot Streamlit / JSON :
+
+   Communication marketing
+     → marketing_budget, répartition MarketingChannels (digital, social_media,
+       influencers, display, events) — plafond MARKET_CONFIG constraints.marketing_max_pct.
+
+   R&D
+     → rd_budget, rd_projects, rd_project_type ; effets liés à new_model_launch.
+
+   Durabilité
+     → sustainability_investment, sustainability_periods.
+
+   Modèles existants (par produit actif)
+     → production, promotion_rate (promo standard ≤ ce que permet la config / règles),
+       withdraw_model, liquidation (promo liquidation jusqu’à promo_liquidation_max),
+       product_status.
+
+   Nouveaux modèles
+     → new_model_launch, segment, model_range, calendrier via statuts produit
+       (development / pre_launch / active, etc.) et scénario associé.
+
+Les segments « jeu » du classeur (numéros 1–6) ne sont pas les mêmes chaînes que les clés
+Python (urbains_presses, …) : utiliser la consigne du cours pour mapper segment cible ↔ clé bot.

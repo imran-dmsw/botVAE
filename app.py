@@ -167,11 +167,14 @@ def build_scenario_from_form(key_prefix: str = "") -> ScenarioInput:
     p = key_prefix
     seg_lbl = st.session_state.get(f"{p}segment_lbl", DEFAULT_SEGMENT_LABEL)
     seg_key = SEGMENT_OPTIONS.get(seg_lbl, "urbains_presses")
+    adj_b = st.session_state.get(f"{p}adj_budget", 1_000_000.0)
+    tr_n = int(st.session_state.get(f"{p}sustain_tranches", 0))
+    sustain_inv = tr_n * 0.005 * adj_b
     return ScenarioInput(
         firm_name=st.session_state.get(f"{p}firm_name", "Firme A"),
         period=st.session_state.get(f"{p}period", 1),
         scenario_name=st.session_state.get(f"{p}scenario_name", "Scenario 1"),
-        model_name=st.session_state.get(f"{p}model_name", "Modele X"),
+        model_name=st.session_state.get(f"{p}model_name", "AVE-SwiftRide M1"),
         product_type=PRODUCT_TYPE_OPTIONS.get(
             st.session_state.get(f"{p}product_type_lbl", DEFAULT_PRODUCT_TYPE_LABEL), "ville_quotidien"
         ),
@@ -193,7 +196,8 @@ def build_scenario_from_form(key_prefix: str = "") -> ScenarioInput:
         rd_budget=st.session_state.get(f"{p}rd_budget", 0.0),
         rd_projects=st.session_state.get(f"{p}rd_projects", 0),
         new_model_launch=st.session_state.get(f"{p}new_model", False),
-        sustainability_investment=st.session_state.get(f"{p}sustain_invest", 0.0),
+        sustainability_investment=sustain_inv,
+        sustainability_tranches=tr_n,
         sustainability_periods=st.session_state.get(f"{p}sustain_periods", 0),
         price=st.session_state.get(f"{p}price", 3000.0),
         promotion_rate=st.session_state.get(f"{p}promo_rate", 0.0) / 100.0,
@@ -208,6 +212,7 @@ def build_scenario_from_form(key_prefix: str = "") -> ScenarioInput:
         ),
         total_withdrawals_used=st.session_state.get(f"{p}total_withdrawals_used", 0),
         last_withdrawal_period=st.session_state.get(f"{p}last_withdrawal_period", 0),
+        withdraw_model=st.session_state.get(f"{p}withdraw_model", False),
     )
 
 
@@ -223,7 +228,7 @@ def scenario_form(key_prefix: str = "", title: str = "Parametres du scenario"):
             st.number_input("Periode", min_value=1, max_value=8, value=1, step=1, key=f"{p}period")
             st.text_input("Nom du scenario", value="Scenario 1", key=f"{p}scenario_name")
         with col2:
-            st.text_input("Nom du modele", value="Modele X", key=f"{p}model_name")
+            st.text_input("Nom du modele", value="AVE-SwiftRide M1", key=f"{p}model_name")
             st.selectbox("Segment cible", list(SEGMENT_OPTIONS.keys()), key=f"{p}segment_lbl")
             st.selectbox("Gamme", list(RANGE_OPTIONS.keys()), index=1, key=f"{p}range_lbl")
         with col3:
@@ -329,8 +334,16 @@ def scenario_form(key_prefix: str = "", title: str = "Parametres du scenario"):
         st.markdown("**Durabilite**")
         col_s1, col_s2 = st.columns(2)
         with col_s1:
-            st.number_input("Investissement durabilite ($)", min_value=0.0, value=0.0,
-                            step=5000.0, key=f"{p}sustain_invest")
+            st.selectbox(
+                "Investissements durables (0,5% du budget ajuste chacun)",
+                options=[0, 1, 2, 3, 4],
+                index=0,
+                key=f"{p}sustain_tranches",
+                help="Cout = n × 0,5 % du budget ajuste ; prime sur le CA si n = 2, 3 ou 4 (sans effet sur le prix).",
+            )
+            adj_d = st.session_state.get(f"{p}adj_budget", 1_000_000.0)
+            tr_d = int(st.session_state.get(f"{p}sustain_tranches", 0))
+            st.caption(f"Montant reglementaire : **{tr_d * 0.005 * adj_d:,.0f} $**")
         with col_s2:
             st.number_input("Periodes d'investissement consecutives", min_value=0, value=0,
                             step=1, key=f"{p}sustain_periods")
@@ -354,13 +367,14 @@ def scenario_form(key_prefix: str = "", title: str = "Parametres du scenario"):
                 help=f"Prix cible suggere : {suggested_price:,.0f} $ (cout + marge gamme + options)"
             )
         with col_p2:
-            st.number_input("Taux de promotion (%)", min_value=-10.0, max_value=0.0,
+            st.number_input("Taux de promotion (%)", min_value=-20.0, max_value=0.0,
                             value=0.0, step=1.0, key=f"{p}promo_rate",
-                            help="Standard max : -5% | Liquidation max : -10%")
+                            help="Standard : 0 %, -2 %, -3 %, -4 %, -5 %, -10 % | Liquidation : jusqu'a -20 %")
         with col_p3:
             st.number_input("Production (unites)", min_value=0, value=1000, step=100, key=f"{p}production")
         with col_p4:
             st.checkbox("Mode liquidation", key=f"{p}liquidation")
+            st.checkbox("Retrait du modele (cette periode)", key=f"{p}withdraw_model")
 
         # ── Contexte ─────────────────────────────────────────────────────────
         st.markdown("**Contexte (periode precedente)**")
@@ -1163,7 +1177,11 @@ def page_full_market():
                 firm_name=user_firm,
                 period=1,
                 scenario_name=f"{user_firm} marche complet",
-                model_name=f"{user_firm} modele",
+                model_name=(
+                    "AVE-SwiftRide M1"
+                    if user_firm == "AVE"
+                    else f"{user_firm} modele"
+                ),
                 segment="urbains_presses",   # overridden per segment inside simulate_full_market
                 model_range=fm_rng_key,
                 product_status="active",

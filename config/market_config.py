@@ -1,5 +1,10 @@
 # Market configuration for Canadian e-bike (VAE) simulation
-# Source: VAE_tout_inclus_12_03_2026_ajuste_periodes.xlsx + Fiche_saisie_equipes_simulation_VAE_Final.xlsx
+# Primary workbook (paramètres alignés bot): VAE_tout_inclus_01_05_2026_Final1.xlsx
+# Fiche équipes (saisie par équipe): Fiche_saisie_equipes_simulation_VAE_ Final.xlsx
+# Références pédagogiques cohorte mars 2026 (PDF / chiffrier / liste des décisions) :
+#   Simulation VAE 12032026 Final.pdf
+#   VAE_tout_inclus_12_03_2026_ajuste_periodes final.xlsx
+#   Décisions à prendre par les étudiants à chaque période.docx  (voir data/pedagogie_references.txt)
 # Reference year: 2026 | Decision periods: 1-8 (2027-2034)
 
 MARKET_CONFIG = {
@@ -293,7 +298,7 @@ MARKET_CONFIG = {
 
         # Promotions (absolute discount %, stored as negative in ScenarioInput)
         "promo_standard_max": -0.05,        # standard promo: max 5% discount
-        "promo_liquidation_max": -0.10,     # liquidation promo: max 10% discount (Excel)
+        "promo_liquidation_max": -0.20,     # liquidation promo: max 20% (PARAM Max_Liquidation_Promo)
 
         # Profitability
         "min_profit_rate": 0.02,            # hard minimum: 2% of revenue
@@ -311,6 +316,17 @@ MARKET_CONFIG = {
         # New product launch
         "new_product_min_units": 1_000,       # year 1 launch: min 1,000 units sold
         "new_product_max_units": 2_000,       # year 1 launch: max 2,000 units sold
+
+        # Référence Excel bot : coûts sur budget de référence ajusté (pas % CA pour ces postes)
+        "aftersales_ref_budget_pct": 0.06,    # SAV = 6 % du budget ajusté
+        "operating_ref_budget_pct": 0.05,     # autres frais d'exploitation = 5 % du budget ajusté
+        "sustainability_tranche_pct": 0.005,   # chaque investissement durable = 0,5 % du budget ajusté
+        # Prime sur le CA uniquement (n'impacte pas le prix / attractivité)
+        "sustainability_revenue_premium_by_tranches": {
+            2: 0.001,
+            3: 0.003,
+            4: 0.005,
+        },
     },
 
     # ── Marketing channels ────────────────────────────────────────────────────

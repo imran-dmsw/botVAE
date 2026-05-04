@@ -358,6 +358,7 @@ async def template(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     simple_template = {
         "scenario_name": "Scenario Test",
         "period": 1,
+        "model_name": "AVE-SwiftRide M1",
         "price": 2500,
         "production": 1000,
         "marketing_budget": 50000,

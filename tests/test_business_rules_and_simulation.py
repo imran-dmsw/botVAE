@@ -1,7 +1,7 @@
 import unittest
 
 from engine.models import ScenarioInput
-from engine.simulation import simulate
+from engine.simulation import simulate, simulate_full_market
 from rules.marketing_rules import profit_rate_status
 from rules.price_rules import check_price_range_consistency
 from rules.product_lifecycle_rules import apply_new_product_first_year_sales_cap
@@ -38,6 +38,8 @@ class TestBusinessRulesAndSimulation(unittest.TestCase):
     def test_validate_promo_rate(self):
         self.assertTrue(validate_promo_rate(-0.05)[0])
         self.assertFalse(validate_promo_rate(-0.07)[0])
+        self.assertTrue(validate_promo_rate(-0.20, liquidation=True)[0])
+        self.assertFalse(validate_promo_rate(-0.21, liquidation=True)[0])
 
     def test_liquidation_next_period_production_zero(self):
         sc = _base_scenario().model_copy(update={"liquidation": True})
@@ -47,6 +49,28 @@ class TestBusinessRulesAndSimulation(unittest.TestCase):
     def test_withdrawal_over_limit(self):
         allowed, _ = check_withdrawal_limits("TRE", 4, {"TRE": [1, 2, 3, 4]}, max_total=4)
         self.assertFalse(allowed)
+
+    def test_withdrawal_min_gap(self):
+        allowed_ok, _ = check_withdrawal_limits(
+            "TRE", 5, {"TRE": [3]}, min_period_gap=2, max_total=4
+        )
+        self.assertTrue(allowed_ok)
+        allowed_bad, _ = check_withdrawal_limits(
+            "TRE", 4, {"TRE": [3]}, min_period_gap=2, max_total=4
+        )
+        self.assertFalse(allowed_bad)
+
+    def test_sustainability_revenue_premium_not_in_base_price(self):
+        """Prime CA sur tranches 2-4 ; attractivité inchangée (même prix saisi)."""
+        from engine.financials import sustainability_revenue_premium_rate
+
+        self.assertEqual(sustainability_revenue_premium_rate(4), 0.005)
+        self.assertEqual(sustainability_revenue_premium_rate(1), 0.0)
+        base = _base_scenario()
+        r0 = simulate(base.model_copy(update={"sustainability_tranches": 0}))
+        r4 = simulate(base.model_copy(update={"sustainability_tranches": 4}))
+        self.assertGreater(r4.revenue, r0.revenue)
+        self.assertEqual(r4.demand, r0.demand)
 
     def test_new_product_first_year_sales_cap(self):
         capped, was_capped, _ = apply_new_product_first_year_sales_cap(3500, is_new_product_first_year=True)
@@ -70,6 +94,26 @@ class TestBusinessRulesAndSimulation(unittest.TestCase):
         all_periods = run_full_market_simulation()
         self.assertEqual(len(all_periods), 8)
         self.assertIn("firms", all_periods[0])
+
+    def test_full_market_runs_all_companies_same_time(self):
+        market = simulate_full_market(period=2, user_firm=None, user_scenario=None)
+        self.assertEqual(len(market["firms"]), 9)
+        self.assertEqual(set(market["firms"].keys()), {"AVE", "CAN", "EBI", "GIA", "PED", "RID", "SUR", "TRE", "VEL"})
+
+    def test_full_market_financial_formulas_consistent(self):
+        base = _base_scenario()
+        market = simulate_full_market(period=1, user_firm="TRE", user_scenario=base)
+        tre = market["firms"]["TRE"]
+        self.assertIn("total_cost_estimate", tre)
+        self.assertGreaterEqual(tre["total_revenue"], 0.0)
+        self.assertGreaterEqual(tre["total_cost_estimate"], 0.0)
+        self.assertAlmostEqual(
+            tre["profit_estimate"],
+            tre["total_revenue"] - tre["total_cost_estimate"],
+            places=4,
+        )
+        self.assertGreaterEqual(tre["capacity_ratio"], 0.0)
+        self.assertLessEqual(tre["capacity_ratio"], 1.0)
 
 
 if __name__ == "__main__":

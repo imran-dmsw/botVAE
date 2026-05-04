@@ -2,6 +2,8 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from config.market_config import MARKET_CONFIG
+
 
 # ─── Enums as string literals ────────────────────────────────────────────────
 
@@ -52,7 +54,7 @@ class ScenarioInput(BaseModel):
     scenario_name: str = Field("Scenario 1", description="Nom du scenario")
 
     # ── Product ─────────────────────────────────────────────────────────────
-    model_name: str = Field("Modele X", description="Nom du modele")
+    model_name: str = Field("AVE-SwiftRide M1", description="Nom du modele")
     product_type: str = Field("ville_quotidien", description="Type de modele (catalogue VAE)")
     segment: str = Field("urbains_presses", description="Segment cible")
     model_range: str = Field("mid", description="Gamme du modele")
@@ -73,6 +75,12 @@ class ScenarioInput(BaseModel):
 
     # ── Sustainability ───────────────────────────────────────────────────────
     sustainability_investment: float = Field(0.0, ge=0, description="Investissement en durabilite (CAD)")
+    sustainability_tranches: int = Field(
+        0,
+        ge=0,
+        le=4,
+        description="Nombre d'investissements durables (0,5 % du budget ajuste chacun, prime CA si 2-4)",
+    )
     sustainability_periods: int = Field(0, ge=0, description="Periodes d'investissement consecutives")
 
     # ── Commercial ──────────────────────────────────────────────────────────
@@ -145,6 +153,18 @@ class ScenarioInput(BaseModel):
                 )
         return self
 
+    @model_validator(mode="after")
+    def sync_sustainability_tranches(self) -> "ScenarioInput":
+        adj = max(self.adjusted_budget, 1.0)
+        pct = MARKET_CONFIG["constraints"]["sustainability_tranche_pct"]
+        tr = max(0, min(4, int(self.sustainability_tranches)))
+        if tr == 0 and self.sustainability_investment > 0:
+            inferred = int(round(self.sustainability_investment / (pct * adj)))
+            tr = max(0, min(4, inferred))
+        self.sustainability_tranches = tr
+        self.sustainability_investment = round(tr * pct * adj, 2)
+        return self
+
 
 # ─── Output models ────────────────────────────────────────────────────────────
 
@@ -159,8 +179,10 @@ class SimulationResult(BaseModel):
     sales: int
     service_rate: float          # sales / demand
 
-    # Financial
+    # Financial (revenue = CA reconnu, inclut la prime durabilite sur le CA si applicable)
     revenue: float
+    base_revenue_before_premium: float = 0.0
+    sustainability_revenue_premium_rate: float = 0.0
     production_cost: float
     distribution_cost: float
     marketing_cost: float

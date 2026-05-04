@@ -19,9 +19,15 @@ COGS model (Excel parameters):
   cogs_ratio: entry=60%, mid=57%, premium=55%
 """
 import math
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from config.market_config import MARKET_CONFIG
+from engine.financials import (
+    aftersales_cost_from_ref_budget,
+    operating_cost_from_ref_budget,
+    sustainability_cost_from_tranches,
+    sustainability_revenue_premium_rate,
+)
 from engine.models import ScenarioInput, SimulationResult
 from engine.rules import validate_scenario
 from reporting.baseline_2026 import build_2026_baseline_summary
@@ -246,6 +252,13 @@ def _make_reference_scenario(firm_key: str, segment: str, period: int) -> Scenar
     )
 
 
+def _make_reference_firm_template(firm_key: str, period: int) -> ScenarioInput:
+    """Build a reference ScenarioInput for a firm (shared baseline for all segments)."""
+    firm_cfg = MARKET_CONFIG["firms"][firm_key]
+    default_segment = firm_cfg.get("default_segment", "urbains_presses")
+    return _make_reference_scenario(firm_key, default_segment, period)
+
+
 # ─── Full market simulation (all 9 firms, all segments) ───────────────────────
 
 def simulate_full_market(
@@ -270,72 +283,110 @@ def simulate_full_market(
     cfg = MARKET_CONFIG
     firms_cfg = cfg["firms"]
 
-    seg_results: dict = {}
+    firm_templates: Dict[str, ScenarioInput] = {}
+    for firm_key in firms_cfg:
+        if user_firm and user_scenario and firm_key == user_firm:
+            firm_templates[firm_key] = user_scenario.model_copy(update={"period": period})
+        else:
+            firm_templates[firm_key] = _make_reference_firm_template(firm_key, period)
+
+    unconstrained_demand: Dict[str, Dict[str, float]] = {seg: {} for seg in cfg["segments"]}
+    seg_results: Dict[str, Dict[str, dict]] = {}
+    segment_firm_scenarios: Dict[Tuple[str, str], ScenarioInput] = {}
 
     for seg_key in cfg["segments"]:
         seg_sz = segment_size(period, seg_key)
-        firm_attrs: dict = {}
+        firm_attrs: Dict[str, float] = {}
 
-        for firm_key in firms_cfg:
-            if user_firm and user_scenario and firm_key == user_firm:
-                # Apply user's strategy across ALL segments — override only the segment key
-                seg_scenario = user_scenario.model_copy(update={"segment": seg_key})
-                attr = calc_attractiveness(seg_scenario)
-            else:
-                ref = _make_reference_scenario(firm_key, seg_key, period)
-                attr = calc_attractiveness(ref)
-
-            firm_attrs[firm_key] = max(attr, 0.001)
+        for firm_key, template in firm_templates.items():
+            seg_scenario = template.model_copy(update={"segment": seg_key, "period": period})
+            segment_firm_scenarios[(seg_key, firm_key)] = seg_scenario
+            firm_attrs[firm_key] = max(calc_attractiveness(seg_scenario), 0.001)
 
         total_attr = sum(firm_attrs.values())
-        seg_results[seg_key] = {}
-
         for firm_key, attr in firm_attrs.items():
-            share = attr / total_attr
-            sales = int(seg_sz * share)
+            share = attr / total_attr if total_attr > 0 else 0.0
+            unconstrained_demand[seg_key][firm_key] = seg_sz * share
 
-            if user_firm and user_scenario and firm_key == user_firm:
-                price = user_scenario.price * (1.0 + user_scenario.promotion_rate)
-            else:
-                price = cfg["segments"][seg_key]["reference_price"]
+    total_unconstrained_by_firm = {
+        firm: sum(unconstrained_demand[seg][firm] for seg in cfg["segments"])
+        for firm in firms_cfg
+    }
+    capacity_ratio_by_firm = {}
+    for firm, template in firm_templates.items():
+        unconstrained_total = total_unconstrained_by_firm[firm]
+        capacity_ratio_by_firm[firm] = (
+            min(1.0, template.production / unconstrained_total)
+            if unconstrained_total > 0
+            else 1.0
+        )
 
+    for seg_key in cfg["segments"]:
+        seg_results[seg_key] = {}
+        seg_sales_total = 0
+        for firm_key in firms_cfg:
+            seg_scenario = segment_firm_scenarios[(seg_key, firm_key)]
+            demand = unconstrained_demand[seg_key][firm_key]
+            sales = int(demand * capacity_ratio_by_firm[firm_key])
+            seg_sales_total += sales
+            effective_price = seg_scenario.price * (1.0 + seg_scenario.promotion_rate)
             seg_results[seg_key][firm_key] = {
                 "sales": sales,
-                "revenue": sales * price,
-                "segment_share": share,
+                "revenue": sales * effective_price,
+                "segment_share": sales / max(seg_sales_total, 1),  # temporary, corrected below
             }
+        # Correct segment shares after all firm sales are known.
+        seg_sales_total = sum(seg_results[seg_key][f]["sales"] for f in firms_cfg)
+        for firm_key in firms_cfg:
+            seg_results[seg_key][firm_key]["segment_share"] = (
+                seg_results[seg_key][firm_key]["sales"] / max(seg_sales_total, 1)
+            )
 
-    # Aggregate per firm + estimate profit
     total_mkt = total_market_size(period)
-    firm_totals: dict = {}
+    firm_totals: Dict[str, dict] = {}
 
-    for firm_key in firms_cfg:
+    for firm_key, template in firm_templates.items():
         tot_sales = sum(seg_results[s][firm_key]["sales"] for s in seg_results)
-        tot_revenue = sum(seg_results[s][firm_key]["revenue"] for s in seg_results)
+        tot_revenue_base = sum(seg_results[s][firm_key]["revenue"] for s in seg_results)
+        ref_b = max(template.adjusted_budget, 0.0)
+        prem_fm = sustainability_revenue_premium_rate(template.sustainability_tranches)
+        tot_revenue = tot_revenue_base * (1.0 + prem_fm)
 
-        # Profit estimate: revenue × (1 - COGS - other fixed pct - typical mktg 8%)
-        if user_firm and user_scenario and firm_key == user_firm:
-            rng = user_scenario.model_range
-        else:
-            rng = firms_cfg[firm_key].get("default_range", "mid")
+        range_cfg = cfg["ranges"][template.model_range]
+        production_cost = 0.0
+        for seg_key in cfg["segments"]:
+            seg_scenario = segment_firm_scenarios[(seg_key, firm_key)]
+            production_cost += seg_results[seg_key][firm_key]["sales"] * get_unit_production_cost(seg_scenario)
 
-        cogs = cfg["cogs_ratios"][rng]
-        range_cfg = cfg["ranges"][rng]
-        other_pct = (
-            range_cfg["distribution_rate"]
-            + range_cfg["operating_rate"]
-            + range_cfg["aftersales_rate"]
+        distribution_cost = tot_revenue_base * range_cfg["distribution_rate"]
+        operating_cost = operating_cost_from_ref_budget(ref_b) + cfg["fixed_overhead"]
+        aftersales_cost = aftersales_cost_from_ref_budget(ref_b)
+        marketing_cost = template.marketing_budget
+        rd_cost = template.rd_budget
+        sustainability_cost = sustainability_cost_from_tranches(template.sustainability_tranches, ref_b)
+        total_cost = (
+            production_cost
+            + distribution_cost
+            + operating_cost
+            + aftersales_cost
+            + marketing_cost
+            + rd_cost
+            + sustainability_cost
         )
-        mktg_pct = 0.08
-        profit_est = tot_revenue * (1 - cogs - other_pct - mktg_pct) - cfg["fixed_overhead"]
-        margin_est = profit_est / max(tot_revenue, 1)
+        profit_est = tot_revenue - total_cost
+        margin_est = profit_est / max(tot_revenue, 1.0)
 
         firm_totals[firm_key] = {
             "total_sales": tot_sales,
             "total_revenue": tot_revenue,
+            "total_revenue_before_premium": tot_revenue_base,
+            "sustainability_revenue_premium_rate": prem_fm,
             "market_share": tot_sales / max(total_mkt, 1),
             "profit_estimate": profit_est,
             "margin_estimate": margin_est,
+            "total_cost_estimate": total_cost,
+            "demand_unconstrained": total_unconstrained_by_firm[firm_key],
+            "capacity_ratio": capacity_ratio_by_firm[firm_key],
             "segments": {
                 seg: {
                     "share": seg_results[seg][firm_key]["segment_share"],
@@ -416,18 +467,20 @@ def _build_interpretations(
     # Price vs COGS hint
     effective_price = s.price * (1.0 + s.promotion_rate)
     cogs_ratio = MARKET_CONFIG["cogs_ratios"][s.model_range]
-    non_prod_costs_pct = (
-        MARKET_CONFIG["ranges"][s.model_range]["distribution_rate"]
-        + MARKET_CONFIG["ranges"][s.model_range]["operating_rate"]
-        + MARKET_CONFIG["ranges"][s.model_range]["aftersales_rate"]
+    dist_pct = MARKET_CONFIG["ranges"][s.model_range]["distribution_rate"]
+    cref = MARKET_CONFIG["constraints"]
+    sav_pct_b = cref["aftersales_ref_budget_pct"]
+    op_pct_b = cref["operating_ref_budget_pct"]
+    interp.append(
+        f"Structure des couts (gamme {MARKET_CONFIG['ranges'][s.model_range]['label']}) : "
+        f"COGS {cogs_ratio*100:.0f}% du prix net, distribution {dist_pct*100:.0f}% du CA hors prime ; "
+        f"SAV {sav_pct_b*100:.0f}% + frais generaux {op_pct_b*100:.0f}% du budget ajuste ({s.adjusted_budget:,.0f} $)."
     )
-    remaining_pct = 1.0 - cogs_ratio - non_prod_costs_pct
-    if effective_price > 0:
+    prem_rt = sustainability_revenue_premium_rate(s.sustainability_tranches)
+    if prem_rt > 0:
         interp.append(
-            f"Structure des couts (gamme {MARKET_CONFIG['ranges'][s.model_range]['label']}) : "
-            f"COGS {cogs_ratio*100:.0f}% + frais variables {non_prod_costs_pct*100:.0f}% "
-            f"= {(cogs_ratio+non_prod_costs_pct)*100:.0f}% du CA. "
-            f"Marge brute disponible avant mktg/R&D : {remaining_pct*100:.0f}%."
+            f"Prime CA durabilite (tranches={s.sustainability_tranches}) : +{prem_rt*100:.2f}% "
+            f"— sans effet sur prix affiche ni demande."
         )
 
     # Marketing intensity vs ROI (target 0-10% of revenue)
@@ -554,18 +607,23 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
             f"Production excessive : environ {unsold:,} unites non vendues - risque de surstockage."
         )
 
-    # ── Financial calculations (COGS ratio model) ─────────────────────────────
+    # ── Financial calculations (COGS + budget de référence pour SAV / frais généraux) ─
     effective_price = scenario.price * (1.0 + scenario.promotion_rate)
-    revenue = sales * effective_price
+    base_revenue = sales * effective_price
+    prem_rt = sustainability_revenue_premium_rate(scenario.sustainability_tranches)
+    revenue = base_revenue * (1.0 + prem_rt)
 
     unit_cost = get_unit_production_cost(scenario)      # price * cogs_ratio
-    production_cost = sales * unit_cost                  # = revenue * cogs_ratio
-    distribution_cost = revenue * range_cfg["distribution_rate"]
+    production_cost = sales * unit_cost                  # = base_revenue * cogs_ratio
+    distribution_cost = base_revenue * range_cfg["distribution_rate"]
     marketing_cost = scenario.marketing_budget
     rd_cost = scenario.rd_budget
-    operating_cost = revenue * range_cfg["operating_rate"] + cfg["fixed_overhead"]
-    aftersales_cost = revenue * range_cfg["aftersales_rate"]
-    sustainability_cost = scenario.sustainability_investment
+    ref_b = max(scenario.adjusted_budget, 0.0)
+    operating_cost = operating_cost_from_ref_budget(ref_b) + cfg["fixed_overhead"]
+    aftersales_cost = aftersales_cost_from_ref_budget(ref_b)
+    sustainability_cost = sustainability_cost_from_tranches(
+        scenario.sustainability_tranches, ref_b
+    )
 
     total_cost = (
         production_cost
@@ -633,13 +691,33 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
         next_prod = 0
         next_prod_expl = "Mode liquidation: production N+1 forcee a 0."
     interpretations.append(next_prod_expl)
-    w_ok, w_msg = check_withdrawal_limits(
-        scenario.firm_name,
-        scenario.period,
-        {scenario.firm_name: [scenario.last_withdrawal_period] if scenario.last_withdrawal_period else []},
-    )
-    if not w_ok:
-        all_alerts.append(w_msg)
+    cfg_w = MARKET_CONFIG["constraints"]
+    w_ok = True
+    if scenario.withdraw_model:
+        if scenario.total_withdrawals_used >= cfg_w["withdrawal_max_total"]:
+            w_ok = False
+            all_alerts.append(
+                f"Retrait bloque : plafond de {cfg_w['withdrawal_max_total']} retraits atteint "
+                f"({scenario.total_withdrawals_used} deja utilises)."
+            )
+        elif scenario.last_withdrawal_period > 0 and (
+            scenario.period - scenario.last_withdrawal_period < cfg_w["withdrawal_min_periods_between"]
+        ):
+            w_ok = False
+            all_alerts.append(
+                f"Retrait bloque : delai minimum {cfg_w['withdrawal_min_periods_between']} periodes "
+                f"non respecte (dernier retrait periode {scenario.last_withdrawal_period})."
+            )
+        else:
+            w_ok, w_msg = check_withdrawal_limits(
+                scenario.firm_name,
+                scenario.period,
+                {scenario.firm_name: [scenario.last_withdrawal_period] if scenario.last_withdrawal_period else []},
+                max_total=cfg_w["withdrawal_max_total"],
+                min_period_gap=cfg_w["withdrawal_min_periods_between"],
+            )
+            if not w_ok:
+                all_alerts.append(w_msg)
 
     baseline_summary = build_2026_baseline_summary(scenario, SimulationResult(
         firm_name=scenario.firm_name,
@@ -649,6 +727,8 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
         sales=sales,
         service_rate=service_rate,
         revenue=revenue,
+        base_revenue_before_premium=base_revenue,
+        sustainability_revenue_premium_rate=prem_rt,
         production_cost=production_cost,
         distribution_cost=distribution_cost,
         marketing_cost=marketing_cost,
@@ -677,6 +757,8 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
         sales=sales,
         service_rate=service_rate,
         revenue=revenue,
+        base_revenue_before_premium=base_revenue,
+        sustainability_revenue_premium_rate=prem_rt,
         production_cost=production_cost,
         distribution_cost=distribution_cost,
         marketing_cost=marketing_cost,

@@ -13,7 +13,9 @@ def evaluate_business_controls(scenario: ScenarioInput, result: SimulationResult
     Central rules engine that evaluates business controls and returns statuses.
     """
     price_status, price_msg = check_price_range_consistency(scenario.price, scenario.model_range)
-    promo_ok, promo_msg = validate_promo_rate(scenario.promotion_rate)
+    promo_ok, promo_msg = validate_promo_rate(
+        scenario.promotion_rate, liquidation=scenario.liquidation
+    )
 
     prate = result.profit / max(result.revenue, 1.0)
     pstatus = profit_rate_status(prate)

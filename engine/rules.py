@@ -35,7 +35,9 @@ def validate_scenario(scenario) -> List[Alert]:
         ))
 
     # ── Promotion limits ─────────────────────────────────────────────────────
-    promo_ok, promo_msg = validate_promo_rate(scenario.promotion_rate)
+    promo_ok, promo_msg = validate_promo_rate(
+        scenario.promotion_rate, liquidation=scenario.liquidation
+    )
     if not promo_ok:
         alerts.append(("error", promo_msg))
 
@@ -80,15 +82,31 @@ def validate_scenario(scenario) -> List[Alert]:
 
     # ── Withdrawal limit rules ───────────────────────────────────────────────
     if scenario.withdraw_model:
-        history = {scenario.firm_name: [scenario.last_withdrawal_period] if scenario.last_withdrawal_period else []}
-        allowed, message = check_withdrawal_limits(
-            scenario.firm_name,
-            scenario.period,
-            history,
-            max_per_year=1,
-            max_total=cfg["withdrawal_max_total"],
-        )
-        alerts.append(("error" if not allowed else "info", message))
+        if scenario.total_withdrawals_used >= cfg["withdrawal_max_total"]:
+            alerts.append((
+                "error",
+                f"Retrait impossible : {scenario.total_withdrawals_used} retrait(s) deja utilises "
+                f"(plafond {cfg['withdrawal_max_total']} sur la simulation).",
+            ))
+        elif scenario.last_withdrawal_period > 0 and (
+            scenario.period - scenario.last_withdrawal_period < cfg["withdrawal_min_periods_between"]
+        ):
+            alerts.append((
+                "error",
+                f"Delai minimum entre retraits : {cfg['withdrawal_min_periods_between']} periodes "
+                f"(dernier retrait : periode {scenario.last_withdrawal_period}).",
+            ))
+        else:
+            history = {scenario.firm_name: [scenario.last_withdrawal_period] if scenario.last_withdrawal_period else []}
+            allowed, message = check_withdrawal_limits(
+                scenario.firm_name,
+                scenario.period,
+                history,
+                max_per_year=1,
+                max_total=cfg["withdrawal_max_total"],
+                min_period_gap=cfg["withdrawal_min_periods_between"],
+            )
+            alerts.append(("error" if not allowed else "info", message))
 
     # ── Product status / commercial consistency ──────────────────────────────
     if scenario.product_status in ("development", "inactive"):

@@ -1,0 +1,37 @@
+Synchronisation — VAE_tout_inclus_01_05_2026_Final1.xlsx vs bot Python (BotMarketing)
+Date de référence : 2026-05-02
+
+1) MODEL_PERIOD — cellule E2 (ligne P001 / 2027)
+   Formule corrigée sur le fichier maître : la référence INDEX([1]E9PRODUCT_MASTER!...)
+   était corrompue ; elle a été remplacée par la même structure que les lignes suivantes :
+   =IF(F2=1,INDEX(PRODUCT_MASTER!$O:$O,MATCH(C2,PRODUCT_MASTER!$A:$A,0)),IFERROR(...)).
+   Ouvrir le classeur dans Excel et enregistrer pour rafraîchir les valeurs calculées si besoin.
+
+2) Cohérence des noms (PRODUCT_MASTER)
+   Contrôle automatique : pour chaque ligne avec CurrentName et CurrentSegment, le dernier
+   caractère numérique du nom correspond au segment courant (ex. ... M1 → segment 1).
+
+3) « Trois prix corrigés » (mandat marketing)
+   Le README du classeur ne liste pas ces trois lignes précises. En pratique elles concernent
+   les prix par produit/période (ex. BasePrice_RefYear dans PRODUCT_MASTER, PriceList /
+   FinalPrice dans MODEL_PERIOD). Le bot ne lit pas le xlsx : aucune propagation automatique
+   vers le code. Pour une calibration chiffrée du moteur Python, reporter manuellement les
+   montants pertinents dans l’UI ou dans config/market_config.py (reference_price, etc.).
+
+4) PARAM vs MARKET_CONFIG
+   Alignés : Base_Market_Units 110000, Market_Growth 0.12, Price_Inflation 0.07,
+   multiplicateurs Bas/Moyen/Haut 0.92 / 1 / 1.12, COGS_Bas/Moyen/Haut 0.60 / 0.57 / 0.55,
+   Max_Promo -0.05.
+   Alignement appliqué dans le code : Max_Liquidation_Promo du classeur = -0.20 →
+   constraints.promo_liquidation_max = -0.20 (était -0.10, incompatible avec la feuille PARAM).
+
+5) FIRMS (Units_RefYear) vs firms.units_ref dans market_config.py
+   Les volumes de référence par firme dans Excel (ex. AVE 22000) ne correspondent pas aux
+   units_ref codés en dur (ex. AVE 13500). Ce n’est pas une erreur d’import : le bot n’a
+   jamais synchronisé cette feuille. Toute réconciliation est une décision de design à part.
+
+6) Documents pédagogiques fournis avec la cohorte (PDF « Simulation VAE 12032026 Final »,
+   chiffrier mars « VAE_tout_inclus_12_03_2026_ajuste_periodes final », fiche équipes,
+   docx « Décisions à prendre… »)
+   Ils complètent le classeur mai 2026 utilisé pour la calibration courante du bot.
+   Index et correspondance décisions ↔ champs du bot : data/pedagogie_references.txt

@@ -204,6 +204,62 @@ def _generate_recommendations(scenario: ScenarioInput, result: SimulationResult)
     return [f"- {r}" for r in recs]
 
 
+def _strip_md_bold(text: str) -> str:
+    return str(text).replace("**", "").strip()
+
+
+def build_scenario_description(scenario: ScenarioInput, result: SimulationResult) -> str:
+    """Paragraphe de synthèse pédagogique (PDF / narrative)."""
+    seg = MARKET_CONFIG["segments"][scenario.segment]["label"]
+    rng = MARKET_CONFIG["ranges"][scenario.model_range]["label"]
+    sn = result.scenario_name or "Scenario"
+    eff_price = scenario.price * (1.0 + scenario.promotion_rate)
+    chunks = [
+        f"Ce scenario « {sn} » place la firme {result.firm_name} en periode {result.period}. "
+        f"Le produit {scenario.model_name} vise le segment « {seg} » en gamme « {rng} ». "
+        f"Prix catalogue {scenario.price:,.0f} $, promotion {scenario.promotion_rate*100:.1f} %, "
+        f"prix net {eff_price:,.0f} $, production planifiee {scenario.production:,} unites.",
+        f"Resultats : {result.sales:,} unites vendues, CA {result.revenue:,.0f} $, "
+        f"profit {result.profit:,.0f} $, marge {result.margin*100:.1f} %. "
+        f"PDM segment {result.market_share_segment*100:.2f} %, service {result.service_rate*100:.0f} %.",
+    ]
+    if scenario.liquidation:
+        chunks.append("Mode liquidation active : anticiper production nulle en periode suivante.")
+    if scenario.new_model_launch or scenario.product_status == "pre_launch":
+        chunks.append("Produit nouveau ou pre-lancement : plafonds et diffusion premiere annee a respecter.")
+    if scenario.withdraw_model:
+        chunks.append("Retrait produit envisage : verifier limites de simulation.")
+    pr = result.profit_rate
+    if pr < 0.05:
+        chunks.append("Rentabilite sous la zone cible usuelle (5-10 % du CA).")
+    elif pr > 0.10:
+        chunks.append("Rentabilite elevee : marge confortable, opportunite de croissance en volume ou en part.")
+    if result.service_rate < 0.9 and result.demand > result.sales:
+        chunks.append("Ecart demande-ventes : risque de penurie ou de file d'attente cote client.")
+    return " ".join(chunks)
+
+
+def merge_improvement_advice(scenario: ScenarioInput, result: SimulationResult) -> list[str]:
+    """Fusionne moteur de recommandations et heuristiques internes, sans doublons."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for rec in build_recommendations(scenario, result):
+        t = _strip_md_bold(rec)
+        k = t.lower()[:120]
+        if k and k not in seen:
+            seen.add(k)
+            out.append(t)
+    for line in _generate_recommendations(scenario, result):
+        t = _strip_md_bold(line.lstrip("- "))
+        k = t.lower()[:120]
+        if k and k not in seen:
+            seen.add(k)
+            out.append(t)
+    if not out:
+        out.append("Poursuivre le suivi des indicateurs profit, taux de service et part de marche segment.")
+    return out
+
+
 # ─── JSON export ──────────────────────────────────────────────────────────────
 
 def generate_json_report(scenario: ScenarioInput, result: SimulationResult) -> str:
@@ -530,6 +586,20 @@ def generate_multi_pdf_report(
             f"Ventes: {res.sales:,} | CA: {res.revenue:,.0f} $ | Profit: {res.profit:,.0f} $ | "
             f"Marge: {res.margin*100:.1f}% | PDM: {res.market_share*100:.2f}% | Service: {res.service_rate*100:.1f}%"
         )
+        pdf.ln(1)
+
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, "Description", ln=True)
+        pdf.set_font("Helvetica", size=10)
+        _safe_multiline(build_scenario_description(sc, res), 5.5)
+        pdf.ln(1)
+
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, "Conseils d'amelioration", ln=True)
+        pdf.set_font("Helvetica", size=10)
+        for tip in merge_improvement_advice(sc, res):
+            _safe_multiline(f"- {tip}", 5.5)
+        pdf.ln(1)
 
         pdf.set_font("Helvetica", "B", 11)
         pdf.cell(0, 7, "Alertes", ln=True)
