@@ -327,6 +327,17 @@ MARKET_CONFIG = {
             3: 0.003,
             4: 0.005,
         },
+
+        # Production / stock (seuils_alertes_production_stock_simulation_VAE.docx)
+        "inventory_carrying_rate": 0.025,
+        "stock_coverage_red_under": 0.90,
+        "stock_coverage_orange_under": 1.00,
+        "stock_coverage_green_max": 1.10,
+        "stock_coverage_yellow_max": 1.20,
+        "stock_lost_sales_alert_pct": 0.10,
+        "stock_final_warn_pct_of_demand": 0.10,
+        "stock_final_surplus_pct_of_demand": 0.20,
+        "stock_storage_vs_gross_profit_pct": 0.05,
     },
 
     # ── Marketing channels ────────────────────────────────────────────────────

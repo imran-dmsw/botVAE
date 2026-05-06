@@ -202,6 +202,7 @@ def build_scenario_from_form(key_prefix: str = "") -> ScenarioInput:
         price=st.session_state.get(f"{p}price", 3000.0),
         promotion_rate=st.session_state.get(f"{p}promo_rate", 0.0) / 100.0,
         production=st.session_state.get(f"{p}production", 1000),
+        opening_stock=st.session_state.get(f"{p}opening_stock", 0),
         liquidation=st.session_state.get(f"{p}liquidation", False),
         adjusted_budget=st.session_state.get(f"{p}adj_budget", 1_000_000.0),
         previous_innovation_score=st.session_state.get(f"{p}prev_innov", 5.0),
@@ -372,6 +373,15 @@ def scenario_form(key_prefix: str = "", title: str = "Parametres du scenario"):
                             help="Standard : 0 %, -2 %, -3 %, -4 %, -5 %, -10 % | Liquidation : jusqu'a -20 %")
         with col_p3:
             st.number_input("Production (unites)", min_value=0, value=1000, step=100, key=f"{p}production")
+            st.number_input(
+                "Stock depart (unites)",
+                min_value=0,
+                value=0,
+                step=100,
+                key=f"{p}opening_stock",
+                help="Stock en debut de periode (avant la production courante). "
+                "Le stock final de N devient le stock de depart de N+1 si vous enchainez les periodes.",
+            )
         with col_p4:
             st.checkbox("Mode liquidation", key=f"{p}liquidation")
             st.checkbox("Retrait du modele (cette periode)", key=f"{p}withdraw_model")

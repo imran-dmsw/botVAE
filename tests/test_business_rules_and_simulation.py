@@ -1,7 +1,12 @@
 import unittest
 
 from engine.models import ScenarioInput
-from engine.simulation import simulate, simulate_full_market
+from engine.simulation import (
+    build_next_period_scenario,
+    period_inflation_factor,
+    simulate,
+    simulate_full_market,
+)
 from rules.marketing_rules import profit_rate_status
 from rules.price_rules import check_price_range_consistency
 from rules.product_lifecycle_rules import apply_new_product_first_year_sales_cap
@@ -99,6 +104,40 @@ class TestBusinessRulesAndSimulation(unittest.TestCase):
         market = simulate_full_market(period=2, user_firm=None, user_scenario=None)
         self.assertEqual(len(market["firms"]), 9)
         self.assertEqual(set(market["firms"].keys()), {"AVE", "CAN", "EBI", "GIA", "PED", "RID", "SUR", "TRE", "VEL"})
+
+    def test_opening_stock_increases_available_units(self):
+        base = _base_scenario()
+        low = simulate(base.model_copy(update={"opening_stock": 0, "production": 800}))
+        high = simulate(base.model_copy(update={"opening_stock": 300, "production": 800}))
+        self.assertGreaterEqual(high.stock_available_units, low.stock_available_units)
+        self.assertGreaterEqual(high.sales, low.sales)
+
+    def test_stock_coverage_alert_when_underproduced(self):
+        sc = _base_scenario().model_copy(update={"production": 200, "opening_stock": 0})
+        res = simulate(sc)
+        self.assertEqual(res.stock_coverage_level, "red_under")
+        self.assertTrue(any("[Stock]" in a for a in res.alerts))
+
+    def test_next_period_opens_with_ending_stock(self):
+        base = _base_scenario()
+        res = simulate(base)
+        nxt = build_next_period_scenario(base, res)
+        self.assertEqual(nxt.opening_stock, res.forecast_ending_stock_units)
+
+    def test_costs_increase_with_period_inflation(self):
+        base = _base_scenario()
+        p1 = simulate(base.model_copy(update={"period": 1, "price": 3200}))
+        p4 = simulate(base.model_copy(update={"period": 4, "price": 3200}))
+        self.assertGreater(period_inflation_factor(4), period_inflation_factor(1))
+        self.assertGreater(p4.production_cost, p1.production_cost)
+
+    def test_reference_model_prices_increase_by_period(self):
+        market_p1 = simulate_full_market(period=1, user_firm=None, user_scenario=None)
+        market_p4 = simulate_full_market(period=4, user_firm=None, user_scenario=None)
+        self.assertGreater(
+            market_p4["firms"]["TRE"]["total_revenue_before_premium"],
+            market_p1["firms"]["TRE"]["total_revenue_before_premium"],
+        )
 
     def test_full_market_financial_formulas_consistent(self):
         base = _base_scenario()

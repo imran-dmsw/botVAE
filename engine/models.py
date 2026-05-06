@@ -87,6 +87,11 @@ class ScenarioInput(BaseModel):
     price: float = Field(2500.0, gt=0, description="Prix unitaire (CAD)")
     promotion_rate: float = Field(0.0, ge=-0.30, le=0, description="Taux de promotion (negatif, ex: -0.05 = -5%)")
     production: int = Field(1000, ge=0, description="Unites produites")
+    opening_stock: int = Field(
+        0,
+        ge=0,
+        description="Stock de depart en debut de periode (unites disponibles avant la production courante)",
+    )
     withdraw_model: bool = Field(False, description="Retrait du modele du marche")
     liquidation: bool = Field(False, description="Mode liquidation")
 
@@ -222,6 +227,15 @@ class SimulationResult(BaseModel):
     withdrawal_limit_status: str = "ok"
     liquidation_next_period_production_flag: bool = False
     baseline_2026_indicator: float = 0.0
+
+    # Production / stock (demande prévue vs stock disponible)
+    opening_stock: int = 0
+    stock_available_units: int = 0
+    forecast_coverage_rate: float = 0.0
+    forecast_lost_sales_units: float = 0.0
+    forecast_ending_stock_units: int = 0
+    inventory_carrying_cost: float = 0.0
+    stock_coverage_level: str = "na"
 
 
 class OptimizationResult(BaseModel):

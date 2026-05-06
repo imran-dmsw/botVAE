@@ -15,7 +15,7 @@ Market growth (single phase, Excel parameters):
   Formula: base_market_size * (1 + growth_rate) ** period
 
 COGS model (Excel parameters):
-  unit_cost = effective_price * cogs_ratio[range]
+  unit_cost = effective_price * cogs_ratio[range] * inflation(period)
   cogs_ratio: entry=60%, mid=57%, premium=55%
 """
 import math
@@ -37,6 +37,7 @@ from rules.product_lifecycle_rules import (
     apply_new_product_first_year_sales_cap,
     liquidation_next_period_production_flag,
 )
+from rules.stock_production_alerts import build_stock_production_diagnostics
 from rules.production_rules import production_efficiency, recommend_next_period_production
 from rules.withdrawal_rules import check_withdrawal_limits
 
@@ -62,6 +63,12 @@ def segment_size(period: int, segment: str) -> float:
 def period_to_year(period: int) -> int:
     """period 1 → 2027, period 8 → 2034."""
     return MARKET_CONFIG["base_year"] + (period - 1)
+
+
+def period_inflation_factor(period: int) -> float:
+    """Inflation factor vs reference year (2026) for a given period."""
+    infl = MARKET_CONFIG.get("price_inflation_rate", 0.0)
+    return (1.0 + infl) ** max(period, 0)
 
 
 # ─── Attractiveness ───────────────────────────────────────────────────────────
@@ -140,10 +147,11 @@ def calc_scores(s: ScenarioInput):
 # ─── COGS-based unit production cost (Excel model) ────────────────────────────
 
 def get_unit_production_cost(s: ScenarioInput) -> float:
-    """Return unit production cost using COGS ratio (Excel: Bas=60%, Moyen=57%, Haut=55%)."""
+    """Return unit production cost with period cost inflation."""
     cogs_ratio = MARKET_CONFIG["cogs_ratios"][s.model_range]
     effective_price = s.price * (1.0 + s.promotion_rate)
-    return effective_price * cogs_ratio
+    base_unit_cost = effective_price * cogs_ratio
+    return base_unit_cost * period_inflation_factor(s.period)
 
 
 # ─── Production suggestion for next period ────────────────────────────────────
@@ -206,6 +214,7 @@ def build_next_period_scenario(
         update={
             "period": target_period,
             "production": suggested,
+            "opening_stock": previous_result.forecast_ending_stock_units,
             "new_model_launch": launch_flag,
             "previous_innovation_score": previous_result.innovation_score,
             "previous_sustainability_score": previous_result.sustainability_score,
@@ -225,8 +234,9 @@ def _make_reference_scenario(firm_key: str, segment: str, period: int) -> Scenar
     range_key = firm_cfg.get("default_range", "mid")
     range_cfg = MARKET_CONFIG["ranges"][range_key]
 
-    # Price: segment reference price × range multiplier
-    price = seg_cfg["reference_price"] * range_cfg.get("price_multiplier", 1.0)
+    # Price: segment reference price × range multiplier × period inflation
+    infl = period_inflation_factor(period)
+    price = seg_cfg["reference_price"] * range_cfg.get("price_multiplier", 1.0) * infl
 
     # Budget estimated from reference units × price
     estimated_revenue = firm_cfg["units_ref"] * price
@@ -583,8 +593,8 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
     seg_sz = segment_size(scenario.period, scenario.segment)
     demand = mkt_share_seg * seg_sz
 
-    # Sales capped by production
-    sales = min(int(demand), scenario.production)
+    stock_available = scenario.opening_stock + scenario.production
+    sales = min(int(demand), stock_available)
     sales, was_capped, cap_msg = apply_new_product_first_year_sales_cap(
         sales,
         is_new_product_first_year=(scenario.new_model_launch or scenario.product_status == "pre_launch"),
@@ -593,19 +603,8 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
     )
     if was_capped:
         all_alerts.append(cap_msg)
+    sales = min(sales, stock_available)
     service_rate = sales / max(demand, 1.0)
-
-    # Production alerts
-    if scenario.production < demand * 0.75 and demand > 0:
-        all_alerts.append(
-            f"Production insuffisante : demande estimee {demand:,.0f} unites, "
-            f"production {scenario.production:,} ({service_rate*100:.0f}% couvert)."
-        )
-    if scenario.production > demand * 1.6 and demand > 0:
-        unsold = scenario.production - int(demand)
-        all_alerts.append(
-            f"Production excessive : environ {unsold:,} unites non vendues - risque de surstockage."
-        )
 
     # ── Financial calculations (COGS + budget de référence pour SAV / frais généraux) ─
     effective_price = scenario.price * (1.0 + scenario.promotion_rate)
@@ -615,6 +614,16 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
 
     unit_cost = get_unit_production_cost(scenario)      # price * cogs_ratio
     production_cost = sales * unit_cost                  # = base_revenue * cogs_ratio
+    gross_profit = base_revenue - production_cost
+    stock_diag = build_stock_production_diagnostics(
+        demand=demand,
+        opening_stock=scenario.opening_stock,
+        production=scenario.production,
+        sales=sales,
+        unit_cost=unit_cost,
+        gross_profit=gross_profit,
+    )
+    inventory_carrying_cost = stock_diag.estimated_storage_cost
     distribution_cost = base_revenue * range_cfg["distribution_rate"]
     marketing_cost = scenario.marketing_budget
     rd_cost = scenario.rd_budget
@@ -633,10 +642,18 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
         + operating_cost
         + aftersales_cost
         + sustainability_cost
+        + inventory_carrying_cost
     )
 
     profit = revenue - total_cost
     margin = profit / max(revenue, 1.0)
+
+    carry_rate = MARKET_CONFIG["constraints"].get("inventory_carrying_rate", 0.025)
+    for sev, msg in stock_diag.alert_severities:
+        if sev in ("error", "warning"):
+            tagged = f"[Stock] {msg}"
+            if tagged not in all_alerts:
+                all_alerts.append(tagged)
 
     # Profit constraint check
     min_profit = revenue * cfg["constraints"]["min_profit_rate"]
@@ -671,6 +688,25 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
         sustainability_score=sustainability_score,
         unit_cost=unit_cost,
     )
+    if demand > 0:
+        interpretations.extend(
+            [
+                (
+                    f"Stock disponible prévu : {stock_diag.stock_available:,} u. "
+                    f"(départ {scenario.opening_stock:,} + production {scenario.production:,})."
+                ),
+                (
+                    f"Taux de couverture prévu : {stock_diag.coverage_rate * 100:.1f} % — "
+                    f"ventes perdues estimées : {stock_diag.lost_sales_units:,.1f} u. — "
+                    f"stock final prévu : {stock_diag.ending_stock_units:,} u."
+                ),
+                (
+                    f"Coût de stockage estimé : {inventory_carrying_cost:,.0f} $ "
+                    f"(stock final × coût unitaire × {carry_rate * 100:.1f} %)."
+                ),
+            ]
+        )
+        interpretations.extend(stock_diag.short_messages)
 
     # ── Extended business indicators ──────────────────────────────────────────
     profit_rate = profit / max(revenue, 1.0)
@@ -682,7 +718,7 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
     prod_eff = production_efficiency(sales, scenario.production)
     next_prod, next_prod_expl = recommend_next_period_production(
         sales_n=sales,
-        stock_final_n=max(scenario.production - sales, 0),
+        stock_final_n=max(stock_available - sales, 0),
         market_trend=MARKET_CONFIG["growth_rate"],
         product_status=scenario.product_status,
         adjustment_factor=1.10,
@@ -790,6 +826,13 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
             scenario.product_status, scenario.liquidation
         ),
         baseline_2026_indicator=baseline_summary["baseline_market_share_2026"] * 100,
+        opening_stock=scenario.opening_stock,
+        stock_available_units=stock_diag.stock_available,
+        forecast_coverage_rate=stock_diag.coverage_rate,
+        forecast_lost_sales_units=stock_diag.lost_sales_units,
+        forecast_ending_stock_units=stock_diag.ending_stock_units,
+        inventory_carrying_cost=inventory_carrying_cost,
+        stock_coverage_level=stock_diag.coverage_level,
     )
 
 

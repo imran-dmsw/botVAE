@@ -16,6 +16,37 @@ from reporting.recommendation_engine import build_recommendations
 # ─── Markdown / text report ───────────────────────────────────────────────────
 
 
+_STOCK_ALERT_TABLE = [
+    ("Taux de couverture prévu", "< 90 %", "Rouge", "Risque élevé de ventes perdues : la production semble insuffisante. Risque important de ventes perdues et de perte de part de marché.", "Augmenter la production ou accepter volontairement une stratégie prudente."),
+    ("Taux de couverture prévu", "90 % à 99 %", "Orange", "Production prudente : risque modéré de rupture si la demande se réalise.", "Ajuster légèrement à la hausse si l'objectif est de gagner des parts de marché."),
+    ("Taux de couverture prévu", "100 % à 110 %", "Vert", "Production équilibrée : bon compromis entre disponibilité et stock.", "Maintenir la décision, sauf si le produit est très risqué ou coûteux à stocker."),
+    ("Taux de couverture prévu", "111 % à 120 %", "Jaune", "Production sécuritaire : stock possible si la demande est plus faible que prévue.", "Vérifier le coût de stockage avant de confirmer."),
+    ("Taux de couverture prévu", "> 120 %", "Rouge", "Risque de surproduction : stock final potentiellement élevé (coût de stockage important et risque d'invendus).", "Réduire la production, sauf stratégie volontaire de disponibilité élevée."),
+    ("Ventes perdues estimées", "> 10 % de la demande prévue", "Orange/Rouge", "Risque important de ventes perdues et de perte de part de marché.", "Augmenter la production si la marge unitaire est attractive."),
+]
+
+
+def _stock_short_messages(result: SimulationResult) -> list[str]:
+    msgs: list[str] = []
+    cov = result.forecast_coverage_rate
+    end_pct = (result.forecast_ending_stock_units / result.demand) if result.demand > 0 else 0.0
+    gross_profit = max(result.revenue - result.production_cost, 0.0)
+    storage_vs_gp = (result.inventory_carrying_cost / gross_profit) if gross_profit > 0 else 0.0
+    if cov < 0.90:
+        msgs.append("Alerte rupture : votre production ne couvre pas suffisamment la demande prévue.")
+    elif cov < 1.00:
+        msgs.append("Production prudente : vous limitez le stock, mais vous risquez des ventes perdues.")
+    elif cov <= 1.10:
+        msgs.append("Production équilibrée : votre décision couvre la demande avec une marge raisonnable.")
+    if end_pct > 0.20:
+        msgs.append("Alerte surstock : votre production dépasse fortement la demande prévue.")
+    elif end_pct > 0.10:
+        msgs.append("Attention : votre décision peut créer du surstockage et des coûts de stockage.")
+    if storage_vs_gp > 0.05:
+        msgs.append("Attention : le stockage risque de réduire fortement votre profit.")
+    return msgs
+
+
 def _pdf_safe(text: object) -> str:
     """
     Normalize text for core FPDF fonts (latin-1).
@@ -131,7 +162,35 @@ def generate_markdown_report(scenario: ScenarioInput, result: SimulationResult) 
         "",
         "---",
         "",
-        "## 6. Analyse et interprétation",
+        "## 6. Production, demande et gestion du stock",
+        "",
+        "| Indicateur | Valeur scénario |",
+        "|---|---|",
+        f"| Stock disponible prévu | {result.stock_available_units:,} unités |",
+        f"| Taux de couverture prévu | {result.forecast_coverage_rate*100:.1f}% |",
+        f"| Ventes perdues estimées | {result.forecast_lost_sales_units:,.1f} unités |",
+        f"| Stock final prévu | {result.forecast_ending_stock_units:,} unités |",
+        f"| Coût de stockage estimé | {result.inventory_carrying_cost:,.0f} $ |",
+        "",
+        "### Tableau principal des seuils d'alerte",
+        "",
+        "| Indicateur | Seuil | Niveau d'alerte | Message à afficher à l'étudiant | Décision possible |",
+        "|---|---|---|---|---|",
+    ]
+    for ind, thr, lvl, msg, decision in _STOCK_ALERT_TABLE:
+        lines.append(f"| {ind} | {thr} | {lvl} | {msg} | {decision} |")
+    lines += [
+        "",
+        "### Messages d'alerte à intégrer dans la feuille de résultats",
+        "",
+    ]
+    for msg in _stock_short_messages(result):
+        lines.append(f"- {msg}")
+    lines += [
+        "",
+        "---",
+        "",
+        "## 7. Analyse et interprétation",
         "",
     ]
 
@@ -142,7 +201,7 @@ def generate_markdown_report(scenario: ScenarioInput, result: SimulationResult) 
         "",
         "---",
         "",
-        "## 7. Reference 2026",
+        "## 8. Reference 2026",
         "",
         f"- Taille du marche 2026: **{baseline_2026['market_size_2026']:,}** unites",
         f"- Baseline prix 2026: **{baseline_2026['baseline_price_2026']:,.0f} $**",
@@ -152,7 +211,7 @@ def generate_markdown_report(scenario: ScenarioInput, result: SimulationResult) 
         "",
         "---",
         "",
-        "## 8. Recommandations",
+        "## 9. Recommandations",
         "",
     ]
     for rec in build_recommendations(scenario, result):
@@ -478,6 +537,34 @@ def generate_pdf_report(scenario: ScenarioInput, result: SimulationResult) -> by
     for r in recs:
         pdf.set_x(pdf.l_margin)
         pdf.multi_cell(page_w, 6, _pdf_safe(r.lstrip("- ")))
+    pdf.ln(2)
+
+    # Section 6 — Stock thresholds (document pedagogique)
+    pdf.set_x(pdf.l_margin)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "6. Production, demande et gestion du stock", ln=True)
+    pdf.set_font("Helvetica", size=10)
+    stock_rows = [
+        f"Stock disponible prevu: {result.stock_available_units:,} unites",
+        f"Taux de couverture prevu: {result.forecast_coverage_rate*100:.1f}%",
+        f"Ventes perdues estimees: {result.forecast_lost_sales_units:,.1f} unites",
+        f"Stock final prevu: {result.forecast_ending_stock_units:,} unites",
+        f"Cout de stockage estime: {result.inventory_carrying_cost:,.0f} $",
+    ]
+    for row in stock_rows:
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(page_w, 6, _pdf_safe(f"- {row}"))
+    pdf.ln(1)
+    for ind, thr, lvl, msg, decision in _STOCK_ALERT_TABLE:
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(
+            page_w,
+            5.5,
+            _pdf_safe(f"[{lvl}] {ind} {thr} -> {msg} Decision: {decision}"),
+        )
+    for msg in _stock_short_messages(result):
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(page_w, 5.5, _pdf_safe(f"- {msg}"))
 
     pdf.set_font("Helvetica", "I", 8)
     pdf.ln(4)
@@ -586,6 +673,18 @@ def generate_multi_pdf_report(
             f"Ventes: {res.sales:,} | CA: {res.revenue:,.0f} $ | Profit: {res.profit:,.0f} $ | "
             f"Marge: {res.margin*100:.1f}% | PDM: {res.market_share*100:.2f}% | Service: {res.service_rate*100:.1f}%"
         )
+        pdf.ln(1)
+
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, "Production, demande et stock", ln=True)
+        pdf.set_font("Helvetica", size=10)
+        _safe_multiline(
+            f"Stock dispo: {res.stock_available_units:,} | Couverture: {res.forecast_coverage_rate*100:.1f}% | "
+            f"Ventes perdues: {res.forecast_lost_sales_units:,.1f} | Stock final: {res.forecast_ending_stock_units:,} | "
+            f"Cout stockage: {res.inventory_carrying_cost:,.0f} $"
+        )
+        for msg in _stock_short_messages(res):
+            _safe_multiline(f"- {msg}", 5.5)
         pdf.ln(1)
 
         pdf.set_font("Helvetica", "B", 11)
