@@ -72,6 +72,7 @@ def generate_markdown_report(scenario: ScenarioInput, result: SimulationResult) 
 
     status_icon = "✅" if result.is_valid else "❌"
     baseline_2026 = build_2026_baseline_summary(scenario, result)
+    ref_2026 = baseline_2026.get("market_reference_state_2026", {})
 
     lines = [
         f"# Rapport de simulation VAE",
@@ -208,6 +209,37 @@ def generate_markdown_report(scenario: ScenarioInput, result: SimulationResult) 
         f"- Baseline part de marche firme: **{baseline_2026['baseline_market_share_2026']*100:.2f}%**",
         f"- Baseline rentabilite: **{baseline_2026['baseline_profitability_2026']*100:.2f}%**",
         f"- Delta CA scenario vs baseline: **{baseline_2026['scenario_vs_baseline_revenue_delta']:,.0f} $**",
+        "",
+        "### Etat 2026 (structure)",
+        "",
+    ]
+
+    if ref_2026:
+        lines.append(
+            f"- Revenu marche 2026 (approx): **{float(ref_2026.get('baseline_market_revenue_2026', 0.0)):,.0f} $**"
+        )
+        lines += ["", "**Segments (part, unites, prix de reference)**"]
+        for seg in ref_2026.get("segments", [])[:6]:
+            lines.append(
+                f"- {seg.get('label','')} — part {float(seg.get('share',0))*100:.1f}% | "
+                f"{float(seg.get('market_units_2026',0)):,.0f} u. | prix ref {float(seg.get('reference_price_2026',0)):,.0f} $"
+            )
+        lines += ["", "**Firmes (units_ref, PDM estimee)**"]
+        for f in ref_2026.get("firms", [])[:9]:
+            lines.append(
+                f"- {f.get('firm_key')} — {float(f.get('units_ref_2026',0)):,.0f} u. | "
+                f"PDM~ {float(f.get('market_share_estimate_2026',0))*100:.2f}% | "
+                f"segment {f.get('default_segment')} | gamme {f.get('default_range')}"
+            )
+        notes = ref_2026.get("notes", [])
+        if notes:
+            lines += ["", "**Notes**"]
+            for n in notes:
+                lines.append(f"- {n}")
+    else:
+        lines.append("- (Reference structurelle 2026 indisponible.)")
+
+    lines += [
         "",
         "---",
         "",

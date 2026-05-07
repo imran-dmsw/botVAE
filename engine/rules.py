@@ -18,12 +18,19 @@ def validate_scenario(scenario) -> List[Alert]:
     cfg = MARKET_CONFIG["constraints"]
 
     # ── Budget caps ──────────────────────────────────────────────────────────
+    mkt_min = scenario.adjusted_budget * cfg.get("marketing_min_pct", 0.0)
     mkt_max = scenario.adjusted_budget * cfg["marketing_max_pct"]
+    if scenario.marketing_budget > 0 and scenario.marketing_budget < mkt_min:
+        alerts.append((
+            "warning",
+            f"Budget marketing ({scenario.marketing_budget:,.0f} $) inferieur au minimum recommande "
+            f"({cfg.get('marketing_min_pct', 0.0)*100:.0f}% du budget ajuste = {mkt_min:,.0f} $).",
+        ))
     if scenario.marketing_budget > mkt_max:
         alerts.append((
             "error",
-            f"Budget marketing ({scenario.marketing_budget:,.0f} $) depasse le plafond de 15 % "
-            f"du budget ajuste ({mkt_max:,.0f} $).",
+            f"Budget marketing ({scenario.marketing_budget:,.0f} $) depasse le plafond "
+            f"({cfg['marketing_max_pct']*100:.0f}% du budget ajuste = {mkt_max:,.0f} $).",
         ))
 
     rd_max = scenario.adjusted_budget * cfg["rd_max_pct"]
@@ -32,6 +39,28 @@ def validate_scenario(scenario) -> List[Alert]:
             "error",
             f"Budget R&D ({scenario.rd_budget:,.0f} $) depasse le plafond de 8 % "
             f"du budget ajuste ({rd_max:,.0f} $).",
+        ))
+
+    # ── R&D: choix discrets (2%, 5%, 8%) ─────────────────────────────────────
+    allowed_pcts = cfg.get("rd_allowed_pcts", [])
+    if scenario.rd_budget > 0 and allowed_pcts:
+        intensity = scenario.rd_budget / max(scenario.adjusted_budget, 1.0)
+        # tolérance pour la saisie en dollars
+        tol = 0.0025
+        if not any(abs(intensity - p) <= tol for p in allowed_pcts):
+            allowed_lbl = ", ".join(f"{p*100:.0f}%" for p in allowed_pcts)
+            alerts.append((
+                "error",
+                f"Budget R&D invalide ({intensity*100:.2f}% du budget ajusté). "
+                f"Valeurs permises : {allowed_lbl}.",
+            ))
+
+    # ── Lancement nouveau modèle: pas en période 1 ───────────────────────────
+    if scenario.new_model_launch and scenario.period == 1:
+        alerts.append((
+            "error",
+            "Lancement bloque en periode 1 : un lancement est autorise a partir de la periode 2 "
+            "apres un investissement R&D prealable.",
         ))
 
     # ── Promotion limits ─────────────────────────────────────────────────────

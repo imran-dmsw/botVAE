@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from engine.models import ScenarioInput, SimulationResult
-from reporting.baseline_2026 import build_2026_baseline_summary
+from reporting.baseline_2026 import build_2026_baseline_summary, build_2026_market_reference_state
 from reporting.recommendation_engine import build_recommendations
 
 
@@ -43,5 +43,6 @@ def build_enriched_report_payload(scenario: ScenarioInput, result: SimulationRes
         },
         "controls": controls,
         "baseline_2026": baseline,
+        "market_reference_2026": build_2026_market_reference_state(),
         "recommendations": recommendations,
     }

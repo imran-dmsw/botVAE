@@ -293,8 +293,14 @@ MARKET_CONFIG = {
     # ── Business rule constraints ─────────────────────────────────────────────
     "constraints": {
         # Budget caps
-        "marketing_max_pct": 0.15,          # max 15% of adjusted budget
+        # PDF (plan final): marketing entre 3% et 10% des ventes N-1.
+        # Dans le bot, adjusted_budget sert de proxy "ventes/CA N-1" pour encadrer la décision.
+        "marketing_min_pct": 0.03,
+        "marketing_max_pct": 0.10,
         "rd_max_pct": 0.08,                 # max 8% of adjusted budget
+
+        # R&D (plan final): choix discrets (2%, 5%, 8%) du budget ajusté
+        "rd_allowed_pcts": [0.02, 0.05, 0.08],
 
         # Promotions (absolute discount %, stored as negative in ScenarioInput)
         "promo_standard_max": -0.05,        # standard promo: max 5% discount
@@ -330,6 +336,8 @@ MARKET_CONFIG = {
 
         # Production / stock (seuils_alertes_production_stock_simulation_VAE.docx)
         "inventory_carrying_rate": 0.025,
+        "stock_surplus_units_threshold": 200,
+        "stock_surplus_penalty_rate": 0.05,
         "stock_coverage_red_under": 0.90,
         "stock_coverage_orange_under": 1.00,
         "stock_coverage_green_max": 1.10,

@@ -42,10 +42,15 @@ def build_stock_production_diagnostics(
     """
     cref = MARKET_CONFIG["constraints"]
     rate = float(cref.get("inventory_carrying_rate", 0.025))
+    surplus_threshold = int(cref.get("stock_surplus_units_threshold", 200))
+    surplus_penalty_rate = float(cref.get("stock_surplus_penalty_rate", 0.0))
 
     stock_available = max(0, opening_stock + production)
     ending_stock = max(0, stock_available - sales)
-    storage_cost = ending_stock * max(unit_cost, 0.0) * rate
+    base_storage_cost = ending_stock * max(unit_cost, 0.0) * rate
+    excess_units = max(0, ending_stock - max(surplus_threshold, 0))
+    surplus_penalty_cost = excess_units * max(unit_cost, 0.0) * max(surplus_penalty_rate, 0.0)
+    storage_cost = base_storage_cost + surplus_penalty_cost
 
     if demand <= 0:
         return StockProductionDiagnostics(
@@ -145,6 +150,16 @@ def build_stock_production_diagnostics(
 
     if gross_profit > 0 and storage_cost > stor_gp * gross_profit:
         shorts.append("Attention : le stockage risque de réduire fortement votre profit.")
+        sev.append(("warning", shorts[-1]))
+
+    if surplus_penalty_cost > 0:
+        details.append(
+            f"Pénalité surstock (au-delà de {surplus_threshold} unités) : "
+            f"{surplus_penalty_cost:,.0f} $."
+        )
+        shorts.append(
+            f"Pénalité surstock appliquée (>{surplus_threshold} u.)."
+        )
         sev.append(("warning", shorts[-1]))
 
     return StockProductionDiagnostics(

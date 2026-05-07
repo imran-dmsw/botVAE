@@ -37,7 +37,8 @@ from reports.generator import (
     generate_json_report,
     generate_multi_pdf_report,
 )
-from data.history import save_scenario, get_summary_df, clear_history
+from reports.company_report import generate_company_markdown_report
+from data.history import save_scenario, get_summary_df, clear_history, load_all
 
 st.set_page_config(
     page_title="Bot VAE — Simulation Marketing",
@@ -305,7 +306,12 @@ def scenario_form(key_prefix: str = "", title: str = "Parametres du scenario"):
                             step=5000.0, key=f"{p}mkt_budget")
         with col_m2:
             adj = st.session_state.get(f"{p}adj_budget", 1_000_000.0)
-            st.caption(f"Plafond : {adj * 0.15:,.0f} $ (15% du budget ajuste)")
+            mkt_min = adj * CFG["constraints"].get("marketing_min_pct", 0.0)
+            mkt_max = adj * CFG["constraints"]["marketing_max_pct"]
+            st.caption(
+                f"Bornes : {mkt_min:,.0f} $ à {mkt_max:,.0f} $ "
+                f"({CFG['constraints'].get('marketing_min_pct',0.0)*100:.0f}%–{CFG['constraints']['marketing_max_pct']*100:.0f}% du budget ajuste)"
+            )
 
         col_c1, col_c2, col_c3, col_c4, col_c5 = st.columns(5)
         with col_c1:
@@ -938,6 +944,28 @@ def page_history():
 
     st.dataframe(df, use_container_width=True, hide_index=True)
 
+    st.subheader("📄 Rapport par compagnie (portefeuille)")
+    firm_options = sorted(df["Firme"].unique().tolist())
+    selected_firm = st.selectbox("Choisir une compagnie", firm_options, key="hist_company_sel")
+    if st.button("Générer le rapport compagnie (Markdown)", key="hist_company_report_btn"):
+        raw = load_all()
+        pairs = []
+        for rec in raw:
+            try:
+                s = ScenarioInput(**rec["scenario"])
+                r = SimulationResult(**rec["result"])
+                pairs.append((s, r))
+            except Exception:
+                continue
+        md = generate_company_markdown_report(selected_firm, pairs)
+        st.download_button(
+            "📄 Télécharger le rapport compagnie (.md)",
+            data=md.encode("utf-8"),
+            file_name=f"rapport_compagnie_{selected_firm}.md",
+            mime="text/markdown",
+            key="hist_company_report_download",
+        )
+
     if len(df) >= 2:
         st.subheader("Evolution dans le temps")
         metric_h = st.selectbox("Metrique", ["Profit ($)", "Marge (%)", "PDM (%)"], key="hist_metric")
@@ -1540,7 +1568,10 @@ def main():
         )
         st.markdown("---")
         st.caption("**Regles cles**")
-        st.caption("• Marketing <= 15% budget ajuste")
+        st.caption(
+            f"• Marketing entre {CFG['constraints'].get('marketing_min_pct',0.0)*100:.0f}% "
+            f"et {CFG['constraints']['marketing_max_pct']*100:.0f}% du budget ajuste"
+        )
         st.caption("• R&D <= 8% budget ajuste")
         st.caption("• Promo standard <= -5%")
         st.caption("• Promo liquidation <= -20%")

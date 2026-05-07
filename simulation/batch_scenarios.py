@@ -54,12 +54,14 @@ def collect_default_batch() -> Tuple[List[ScenarioInput], List[SimulationResult]
         results.append(pack["result"])
 
     for pr in [0.0, -0.02, -0.05, -0.10]:
-        ok, _ = validate_promo_rate(pr)
+        ok, _ = validate_promo_rate(pr, liquidation=(pr <= -0.10))
         if not ok:
             continue
         sc = base.model_copy(
             update={"promotion_rate": pr, "scenario_name": f"Sweep_promo_{int(pr * 100)}%"}
         )
+        if pr <= -0.10:
+            sc = sc.model_copy(update={"liquidation": True, "product_status": "withdrawal"})
         scenarios.append(sc)
         results.append(simulate(sc))
 
