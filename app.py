@@ -21,7 +21,11 @@ from engine.simulation import (
     simulate_full_market, simulate_full_market_all_periods, suggest_next_production,
 )
 from engine.optimizer import find_parameters_for_target, SUPPORTED_METRICS
+from engine.firm_simulation import simulate_firm_portfolio
+from engine.budget_allocation import ALLOCATION_METHODS
+from engine.market_matrix import matrix_from_full_market
 from engine.plan_executor import execute_plan_matrix, runs_to_dataframe, compare_policies
+from engine.rapport_alertes import build_prioritized_alerts
 from simulation.multi_scenario_runner import (
     run_all_scenarios,
     compare_scenarios as compare_auto_scenarios,
@@ -696,6 +700,96 @@ def page_single_simulation():
 
     scenario_form(key_prefix="s1_")
 
+    with st.expander("Répartition budgets firme (portefeuille)", expanded=False):
+        try:
+            from scripts.generate_rapport_vae_style_pdf import load_products, firm_ref_revenue, scenario_from_product
+            from vae_rapport_firme_logic import default_excel_path
+            import openpyxl
+
+            firm = st.selectbox("Firme portefeuille", FIRM_OPTIONS, key="alloc_firm")
+            method = st.selectbox(
+                "Méthode d'allocation",
+                list(ALLOCATION_METHODS),
+                format_func=lambda m: {
+                    "forecast_sales": "Ventes prévues",
+                    "strategic_segment": "Segment stratégique",
+                    "equal": "Répartition égale",
+                    "custom": "Personnalisée",
+                }.get(m, m),
+                key="alloc_method",
+            )
+            xlsx = default_excel_path()
+            if xlsx.exists():
+                wb = openpyxl.load_workbook(xlsx, data_only=True)
+                prods = load_products(wb, firm)
+                wb.close()
+                adj = firm_ref_revenue(prods)
+
+                def _build(prod, alloc):
+                    return scenario_from_product(
+                        prod,
+                        firm,
+                        1,
+                        f"{prod.product_key}_alloc",
+                        adj,
+                        products=prods,
+                        allocation_method=method,
+                    )
+
+                portfolio = simulate_firm_portfolio(
+                    prods,
+                    _build,
+                    firm_adjusted_budget=adj,
+                    allocation_method=method,
+                )
+                alloc_df = pd.DataFrame(
+                    [
+                        {
+                            "Produit": row["product_key"],
+                            "Poids": row["allocation"].weight,
+                            "Marketing": row["allocation"].marketing,
+                            "R&D": row["allocation"].rd,
+                            "Profit": row["result"].profit,
+                            "Marge": row["result"].margin,
+                        }
+                        for row in portfolio.products
+                    ]
+                )
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.plotly_chart(
+                        px.bar(alloc_df, x="Produit", y="Marketing", title="Allocation marketing"),
+                        use_container_width=True,
+                    )
+                with c2:
+                    st.plotly_chart(
+                        px.bar(alloc_df, x="Produit", y="R&D", title="Allocation R&D"),
+                        use_container_width=True,
+                    )
+                st.plotly_chart(
+                    px.bar(alloc_df, x="Produit", y="Profit", title="Profit par produit"),
+                    use_container_width=True,
+                )
+                st.plotly_chart(
+                    px.bar(
+                        alloc_df,
+                        x="Produit",
+                        y=alloc_df["Profit"] / alloc_df["Marketing"].replace(0, pd.NA),
+                        title="ROI marketing par produit",
+                    ),
+                    use_container_width=True,
+                )
+                st.caption(
+                    f"Budget firme marketing {portfolio.firm_marketing_total:,.0f} $ | "
+                    f"R&D {portfolio.firm_rd_total:,.0f} $ | "
+                    f"Profit firme {portfolio.firm_profit:,.0f} $ | "
+                    f"Stabilité {portfolio.stability_score:.0f}/100"
+                )
+            else:
+                st.info("Classeur Excel introuvable pour le portefeuille firme.")
+        except Exception as exc:
+            st.warning(f"Allocation portefeuille indisponible : {exc}")
+
     if st.button("▶️ Simuler", type="primary", use_container_width=True):
         try:
             scenario = build_scenario_from_form("s1_")
@@ -1081,6 +1175,18 @@ def _display_full_market_period(mkt: dict):
         use_container_width=True,
     )
 
+    st.subheader("Tableau croisé firme × segment (PDM)")
+    matrix = matrix_from_full_market(mkt, value_mode="pdm")
+    matrix_df = pd.DataFrame(
+        matrix["numeric"],
+        index=matrix["firms"],
+        columns=matrix["columns"],
+    )
+    st.dataframe(matrix_df.style.format("{:.1f}%"), use_container_width=True)
+    st.caption(
+        "Lecture : lignes = firmes, colonnes = segments, valeurs = part de marché dans le segment."
+    )
+
     # Leader summary
     st.caption("**Leaders par segment :** " + " | ".join(
         f"{seg_labels.get(sk, sk)}: **{ldr}**"
@@ -1252,9 +1358,11 @@ def page_full_market():
         else:
             with st.spinner("Simulation 8 periodes x 9 firmes x 6 segments..."):
                 all_periods = simulate_full_market_all_periods(user_firm, user_scenario)
-            st.subheader(f"Marche complet — 2027 a 2034")
+            st.subheader(f"Marche complet — {CFG['base_year']} a {CFG['base_year'] + CFG['num_periods'] - 1}")
             # Show final period ranking
-            st.markdown("**Classement final (Periode 8 — 2034)**")
+            st.markdown(
+                f"**Classement final (Periode 8 — {CFG['base_year'] + CFG['num_periods'] - 1})**"
+            )
             df_final = _full_market_ranking_table(all_periods[-1]["firms"], user_firm)
             st.dataframe(df_final, use_container_width=True, hide_index=True)
             st.markdown("---")
@@ -1360,10 +1468,22 @@ def page_auto_scenarios():
 
         st.subheader("Alertes metier")
         for out in st.session_state["auto_outputs"]:
-            if out["alerts"]:
-                with st.expander(f"Alertes - {out['scenario']}", expanded=False):
-                    for alert in out["alerts"][:8]:
-                        st.warning(alert)
+            grouped = build_prioritized_alerts(
+                scenario=out["scenario_input"],
+                result=out["result"],
+            )
+            with st.expander(f"Alertes - {out['scenario']}", expanded=False):
+                for level, label, fn in (
+                    ("critique", "Critique", st.error),
+                    ("attention", "Attention", st.warning),
+                    ("information", "Information", st.info),
+                ):
+                    items = grouped.get(level, [])
+                    if not items:
+                        continue
+                    st.markdown(f"**{label}**")
+                    for alert in items[:6]:
+                        fn(alert.message)
 
         st.subheader("Recommandations")
         for out in st.session_state["auto_outputs"]:

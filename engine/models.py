@@ -3,6 +3,7 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from config.market_config import MARKET_CONFIG
+from engine.budget_allocation import DEFAULT_ALLOCATION_METHOD
 
 
 # ─── Enums as string literals ────────────────────────────────────────────────
@@ -50,7 +51,7 @@ class MarketingChannels(BaseModel):
 class ScenarioInput(BaseModel):
     # ── Identification ──────────────────────────────────────────────────────
     firm_name: str = Field("Firme A", description="Nom de la firme")
-    period: int = Field(1, ge=1, le=8, description="Periode de simulation (1=2027 ... 8=2034)")
+    period: int = Field(1, ge=1, le=8, description="Periode de simulation (1=2026 ... 8=2033)")
     scenario_name: str = Field("Scenario 1", description="Nom du scenario")
 
     # ── Product ─────────────────────────────────────────────────────────────
@@ -111,6 +112,26 @@ class ScenarioInput(BaseModel):
         10.0,
         gt=0,
         description="Attractivite totale des concurrents dans le segment",
+    )
+    allocation_method: str = Field(
+        DEFAULT_ALLOCATION_METHOD,
+        description="Methode de repartition des budgets firme entre produits",
+    )
+    allocation_weight: float = Field(
+        1.0,
+        ge=0.0,
+        le=1.0,
+        description="Poids du produit dans la repartition marketing/R&D firme",
+    )
+    firm_marketing_budget_total: float = Field(
+        0.0,
+        ge=0,
+        description="Budget marketing total firme avant allocation produit",
+    )
+    firm_rd_budget_total: float = Field(
+        0.0,
+        ge=0,
+        description="Budget R&D total firme avant allocation produit",
     )
 
     # ── Validators ──────────────────────────────────────────────────────────
@@ -236,6 +257,14 @@ class SimulationResult(BaseModel):
     forecast_ending_stock_units: int = 0
     inventory_carrying_cost: float = 0.0
     stock_coverage_level: str = "na"
+
+    allocation_weight: float = 1.0
+    firm_marketing_budget_total: float = 0.0
+    firm_rd_budget_total: float = 0.0
+    marketing_roi: float = 0.0
+    rd_roi: float = 0.0
+    simulation_stability_score: float = 100.0
+    financial_control_messages: List[str] = Field(default_factory=list)
 
 
 class OptimizationResult(BaseModel):

@@ -46,9 +46,9 @@ RED_LT_XL = "FAEAEA"
 
 # ─── Mise en page ───────────────────────────────────────────────────────────
 PAGE_WIDTH, PAGE_HEIGHT = A4
-LEFT_MARGIN = RIGHT_MARGIN = 20 * mm
-TOP_MARGIN = 18 * mm
-BOTTOM_MARGIN = 16 * mm + 14 * mm
+LEFT_MARGIN = RIGHT_MARGIN = 18 * mm
+TOP_MARGIN = 14 * mm
+BOTTOM_MARGIN = 14 * mm + 10 * mm
 CONTENT_WIDTH = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN
 
 _BASE = getSampleStyleSheet()
@@ -58,7 +58,7 @@ P_BODY = ParagraphStyle(
     parent=_BASE["Normal"],
     fontName="Helvetica",
     fontSize=9.5,
-    leading=15,
+    leading=13,
     textColor=colors.black,
     alignment=TA_LEFT,
 )
@@ -71,17 +71,17 @@ P_INS = ParagraphStyle(
     "VAE_INS",
     parent=P_BODY,
     fontSize=9.5,
-    leading=14,
+    leading=12,
 )
 P_H1 = ParagraphStyle(
     "VAE_H1",
     parent=_BASE["Heading1"],
     fontName="Helvetica-Bold",
     fontSize=11,
-    leading=14,
+    leading=13,
     textColor=NAVY,
-    spaceBefore=6,
-    spaceAfter=4,
+    spaceBefore=3,
+    spaceAfter=2,
 )
 P_SEC = ParagraphStyle(
     "VAE_SEC",
@@ -126,7 +126,7 @@ P_SMALL = ParagraphStyle(
     parent=_BASE["Normal"],
     fontName="Helvetica",
     fontSize=8,
-    leading=11,
+    leading=10,
     textColor=GRAY_M,
 )
 P_TOC = ParagraphStyle(
@@ -140,7 +140,7 @@ P_ALERT_BODY = ParagraphStyle(
     "VAE_ALERT",
     parent=P_BODY,
     fontSize=9.5,
-    leading=14,
+    leading=12,
 )
 P_COVER_TITLE = ParagraphStyle(
     "VAE_COVER_T",
@@ -200,16 +200,16 @@ def HR() -> Table:
 
 
 def SEC(story: list, label: str) -> None:
-    story.append(Spacer(1, 6))
+    story.append(Spacer(1, 4))
     story.append(Paragraph(pdf_escape(label.upper()), P_SEC))
 
 
 def H1(story: list, text: str) -> None:
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 4))
     story.append(Paragraph(pdf_escape(text), P_H1))
-    story.append(Spacer(1, 2))
+    story.append(Spacer(1, 1))
     story.append(HR())
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 4))
 
 
 def _align_to_ta(align: str) -> int:
@@ -255,10 +255,10 @@ def box_info(
             [
                 ("BACKGROUND", (0, 0), (-1, -1), bg),
                 ("BOX", (0, 0), (-1, -1), 1, border_color),
-                ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-                ("TOPPADDING", (0, 0), (-1, -1), 10),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+                ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
             ]
         )
     )
@@ -287,8 +287,8 @@ def table_standard(
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, 0), 8),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ("LEFTPADDING", (0, 0), (-1, -1), 5),
         ("RIGHTPADDING", (0, 0), (-1, -1), 5),
         ("GRID", (0, 0), (-1, -1), 0.25, GRAY_M),
@@ -334,8 +334,8 @@ def kpi_block(items: Sequence[tuple[str, str, colors.Color | None]]) -> Table:
                 ("BOX", (0, 0), (-1, -1), 0.5, GRAY_M),
                 ("INNERGRID", (0, 0), (-1, -1), 0.25, GRAY_L),
                 ("BACKGROUND", (0, 0), (-1, -1), BLUE_LT),
-                ("TOPPADDING", (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
             ]
         )
     )
@@ -362,7 +362,14 @@ def cover_banner(title: str, subtitle: str) -> Table:
     return tbl
 
 
-def add_footer(canvas: Canvas, doc: SimpleDocTemplate, firm_code: str, left_text: str) -> None:
+def add_footer(
+    canvas: Canvas,
+    doc: SimpleDocTemplate,
+    firm_code: str,
+    left_text: str,
+    *,
+    report_date: str | None = None,
+) -> None:
     del firm_code  # API conforme au contrat projet ; le texte gauche est explicite.
     canvas.saveState()
     w, _h = PAGE_WIDTH, PAGE_HEIGHT
@@ -374,8 +381,9 @@ def add_footer(canvas: Canvas, doc: SimpleDocTemplate, firm_code: str, left_text
     canvas.setFillColor(GRAY_M)
     y_txt = 10 * mm
     canvas.drawString(LEFT_MARGIN, y_txt, str(left_text))
+    if report_date:
+        canvas.drawCentredString(w / 2.0, y_txt, f"Généré le {report_date}")
     page_txt = f"Page {doc.page}"
-    tw = canvas.stringWidth(page_txt, "Helvetica", 8)
     canvas.drawRightString(w - RIGHT_MARGIN, y_txt, page_txt)
     canvas.restoreState()
 
@@ -385,6 +393,8 @@ def build_doc(
     story: list,
     firm_code: str = "XXX",
     left_text: str = "Simulation marché VAE — Usage interne",
+    *,
+    report_date: str | None = None,
 ) -> None:
     path = Path(filepath)
     if not path.is_absolute():
@@ -401,7 +411,7 @@ def build_doc(
     )
 
     def _draw_footer(canvas: Canvas, doc_: SimpleDocTemplate) -> None:
-        add_footer(canvas, doc_, firm_code, left_text)
+        add_footer(canvas, doc_, firm_code, left_text, report_date=report_date)
 
     doc.build(story, onFirstPage=_draw_footer, onLaterPages=_draw_footer)
 

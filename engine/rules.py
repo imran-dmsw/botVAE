@@ -4,7 +4,9 @@ All constraint checks return a list of (severity, message) tuples.
 severity: "error" | "warning" | "info"
 """
 from typing import List, Tuple
+
 from config.market_config import MARKET_CONFIG
+from engine.budget_allocation import firm_rd_allowed_pcts
 from rules.price_rules import check_price_range_consistency
 from rules.promo_rules import validate_promo_rate
 from rules.withdrawal_rules import check_withdrawal_limits
@@ -17,15 +19,41 @@ def validate_scenario(scenario) -> List[Alert]:
     alerts: List[Alert] = []
     cfg = MARKET_CONFIG["constraints"]
 
-    # ── Budget caps ──────────────────────────────────────────────────────────
+    # ── R&D : interdit en période 1 (lancement effectif à partir de P2) ───────
+    if scenario.period == 1 and scenario.rd_budget > 0:
+        alerts.append((
+            "error",
+            "Budget R&D en periode 1 : la regle chiffrier impose un lancement R&D a partir de la periode 2.",
+        ))
+
+    # ── Marketing : P2+ minimum 3 % du budget ajusté (si budget marketing > 0) ─
     mkt_min = scenario.adjusted_budget * cfg.get("marketing_min_pct", 0.0)
-    mkt_max = scenario.adjusted_budget * cfg["marketing_max_pct"]
-    if scenario.marketing_budget > 0 and scenario.marketing_budget < mkt_min:
+    if scenario.period >= 2 and scenario.marketing_budget > 0 and scenario.marketing_budget + 1e-6 < mkt_min:
         alerts.append((
             "warning",
-            f"Budget marketing ({scenario.marketing_budget:,.0f} $) inferieur au minimum recommande "
-            f"({cfg.get('marketing_min_pct', 0.0)*100:.0f}% du budget ajuste = {mkt_min:,.0f} $).",
+            f"Periode {scenario.period} : marketing ({scenario.marketing_budget:,.0f} $) sous le plancher "
+            f"P2+ ({cfg.get('marketing_min_pct', 0.0)*100:.0f}% du budget ajuste = {mkt_min:,.0f} $).",
         ))
+
+    # ── Production active (hors lancement) : plage chiffrier 1 500–3 000 u. ─
+    pmin = int(cfg.get("production_min_units_active", 0) or 0)
+    pmax = int(cfg.get("production_max_units_active", 0) or 0)
+    if (
+        pmin > 0
+        and pmax > 0
+        and scenario.product_status == "active"
+        and not scenario.new_model_launch
+        and scenario.production > 0
+        and (scenario.production < pmin or scenario.production > pmax)
+    ):
+        alerts.append((
+            "warning",
+            f"Production ({scenario.production:,} u.) hors plage chiffrier recommandee "
+            f"{pmin:,}–{pmax:,} u. pour un modele actif.",
+        ))
+
+    # ── Budget caps ──────────────────────────────────────────────────────────
+    mkt_max = scenario.adjusted_budget * cfg["marketing_max_pct"]
     if scenario.marketing_budget > mkt_max:
         alerts.append((
             "error",
@@ -77,12 +105,11 @@ def validate_scenario(scenario) -> List[Alert]:
     elif consistency == "warning":
         alerts.append(("warning", consistency_msg))
 
-    # ── Liquidation → next period production = 0 ────────────────────────────
     if scenario.liquidation:
         alerts.append((
             "info",
-            "Mode liquidation : la production doit etre mise a 0 a la periode suivante "
-            "(regle : aucune fabrication apres liquidation d'un modele).",
+            "Mode liquidation : production de la periode suivante = 0 ; promotion liquidation plafonnee ; "
+            "regle pedagogique — au plus une liquidation par an par enseigne.",
         ))
 
     # ── Production constraints ────────────────────────────────────────────────
@@ -183,6 +210,25 @@ def validate_scenario(scenario) -> List[Alert]:
     return alerts
 
 
+def portfolio_model_count_alerts(firm: str, n_models: int) -> List[Alert]:
+    """Comparer le nombre de modèles du portefeuille à une baseline optionnelle (feuille Excel / règle jeu)."""
+    firm_cfg = MARKET_CONFIG["firms"].get(firm, {})
+    base_n = firm_cfg.get("portfolio_baseline_models")
+    if base_n is None:
+        return []
+    max_extra = int(MARKET_CONFIG["constraints"].get("portfolio_max_extra_models", 2))
+    cap = int(base_n) + max_extra
+    if n_models <= cap:
+        return []
+    return [
+        (
+            "error",
+            f"Portefeuille ({n_models} modeles) : plafond chiffrier {cap} "
+            f"(baseline {int(base_n)} + {max_extra} au plus).",
+        )
+    ]
+
+
 def get_budget_caps(adjusted_budget: float) -> dict:
     """Return the maximum allowed budgets for marketing and R&D."""
     cfg = MARKET_CONFIG["constraints"]
@@ -191,6 +237,7 @@ def get_budget_caps(adjusted_budget: float) -> dict:
         "rd_max": adjusted_budget * cfg["rd_max_pct"],
         "marketing_pct": cfg["marketing_max_pct"],
         "rd_pct": cfg["rd_max_pct"],
+        "rd_allowed_pcts": firm_rd_allowed_pcts(),
     }
 
 

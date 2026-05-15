@@ -1,16 +1,4 @@
-"""
-Rapport PDF « style rapport_vae.pdf » : résumé exécutif, TOC, tableau de bord agrégé,
-puis pour la firme et pour chaque ligne du portefeuille Excel les mêmes sections 2 à 8 —
-contexte concurrentiel, portefeuille (vue firme ou focus modèle), leviers stratégiques,
-scénario de référence, structure des coûts, projection P1/P4/P8 figée, recommandations —
-puis synthèse décisionnelle et conclusion.
-
-Sources : classeur VAE (FIRMS, SEGMENTS, MARKETING_MATRIX, BASE_REFERENCE_MODEL, PARAM)
-         + moteur engine.simulation.simulate().
-
-Usage:
-  python3 scripts/generate_rapport_vae_style_pdf.py --firm TRE
-"""
+"""Rapport PDF VAE moderne (vue firme + fiches modèles)."""
 from __future__ import annotations
 
 import argparse
@@ -23,55 +11,53 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.dirname(__file__))
 
 import openpyxl
+from reportlab.lib.colors import Color
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.units import mm
 
 from config.market_config import MARKET_CONFIG
+from engine.budget_allocation import snap_rd_firm_pct
+from engine.market_matrix import build_cross_matrix_pct_total_market
 from engine.models import MarketingChannels, ScenarioInput, SimulationResult
-from engine.simulation import (
-    period_inflation_factor,
-    period_to_year,
-    segment_size,
-    simulate,
-    total_market_size,
-)
-
-sys.path.insert(0, os.path.dirname(__file__))
+from engine.rapport_alertes import build_prioritized_alerts, flatten_prioritized_alerts
+from engine.simulation import period_inflation_factor, period_to_year, segment_size, simulate, total_market_size
+from vae_rapport_firme_logic import default_excel_path, resolve_firm_code
 from vae_report_style import (
     CONTENT_WIDTH,
     GREEN_LT,
     NAVY,
-    H1,
-    PageBreak,
-    Paragraph,
     P_INS,
     P_JUST,
     P_SMALL,
     P_TOC,
+    H1,
+    PageBreak,
+    Paragraph,
     Spacer,
-    box_info,
     build_doc,
+    cover_banner,
     kpi_block,
     pdf_escape,
     pdf_xml_fragment,
     table_standard,
+    toc_block,
 )
+from vae_report_tables import (
+    canonical_gamme_label,
+    competitor_reaction_blurb,
+    portfolio_anomaly_note,
+    production_band_note,
+    scenario_display_title,
+    top3_channels_cell,
+)
+from vae_rapport_firme_logic import build_firm_recommendations, build_model_recommendations
 
-DEFAULT_XLSX = Path("/Users/imran/Downloads/VAE_tout_inclus_01_05_2026_Final1_v6.xlsx")
-OUT_PDF = Path("reports/Rapport_analyse_strategique_{firm}_VAE.pdf")
+DEFAULT_XLSX = default_excel_path()
+OUT_PDF = Path("reports/Rapport_{firm}_VAE_{date}.pdf")
 DOWNLOADS = Path("/Users/imran/Downloads")
-
-# Alias courant : « VAE » pour le cadre pédagogique → firme AVE dans le classeur / moteur
-FIRM_CODE_ALIASES = {"VAE": "AVE"}
-
-
-def resolve_firm_code(raw: str) -> str:
-    u = raw.upper().strip()
-    return FIRM_CODE_ALIASES.get(u, u)
-
 
 FIRM_LEGEND = {
     "TRE": "TrailRidge Mobility (TRE)",
@@ -93,7 +79,7 @@ SEG_IDX_TO_KEY = {
     5: "familles_cargo",
     6: "aventuriers_tt",
 }
-
+SEG_KEY_TO_IDX = {v: k for k, v in SEG_IDX_TO_KEY.items()}
 RANGE_MAP = {
     "Basic": "entry",
     "Medium": "mid",
@@ -104,6 +90,29 @@ RANGE_MAP = {
     "Haut": "premium",
 }
 
+AUTO_SCENARIO_TAGS = (
+    "_FocalPremium_P2",
+    "_FocalPremium_P1",
+    "_Marketing_Max_P1",
+    "_RD_5pct_P2",
+    "_SousProduction_P1",
+    "_Durabilite_2_tranches",
+    "_Figee_P4",
+    "_Figee_P8",
+)
+
+
+def fmt_money(x: float) -> str:
+    return f"{int(round(float(x))):,}".replace(",", " ")
+
+
+def fmt_pct(x: float, dec: int = 1) -> str:
+    return f"{100.0 * float(x):.{dec}f} %"
+
+
+def fmt_pct_and_money(pct: float, amount: float) -> str:
+    return f"{pct * 100:.1f} % ({fmt_money(amount)} $)".replace(".", ",")
+
 
 def product_type_for_segment(seg_idx: int) -> str:
     if seg_idx == 6:
@@ -112,9 +121,7 @@ def product_type_for_segment(seg_idx: int) -> str:
         return "cargo_familial"
     if seg_idx == 3:
         return "route_connecte"
-    if seg_idx == 4:
-        return "vtc_polyvalent"
-    if seg_idx == 2:
+    if seg_idx in (2, 4):
         return "vtc_polyvalent"
     return "ville_quotidien"
 
@@ -130,7 +137,7 @@ class ProdRow:
 
     @property
     def revenue(self) -> float:
-        return self.base_price * self.units
+        return float(self.base_price) * float(self.units)
 
 
 def load_products(wb: openpyxl.Workbook, firm: str) -> list[ProdRow]:
@@ -138,7 +145,7 @@ def load_products(wb: openpyxl.Workbook, firm: str) -> list[ProdRow]:
     h = {ws.cell(1, c).value: c for c in range(1, ws.max_column + 1)}
     out: list[ProdRow] = []
     for r in range(2, ws.max_row + 1):
-        if ws.cell(r, h["Firm"]).value != firm:
+        if str(ws.cell(r, h["Firm"]).value or "").upper() != firm:
             continue
         seg = ws.cell(r, h["Segment"]).value
         try:
@@ -147,234 +154,28 @@ def load_products(wb: openpyxl.Workbook, firm: str) -> list[ProdRow]:
             continue
         out.append(
             ProdRow(
-                str(ws.cell(r, h["ProductKey"]).value),
-                str(ws.cell(r, h["ModelName"]).value),
-                seg_i,
-                str(ws.cell(r, h["Range"]).value),
-                float(ws.cell(r, h["BasePrice_RefYear"]).value or 0),
-                float(ws.cell(r, h["Units_RefYear"]).value or 0),
+                product_key=str(ws.cell(r, h["ProductKey"]).value or "").strip(),
+                model_name=str(ws.cell(r, h["ModelName"]).value or "").strip(),
+                segment_idx=seg_i,
+                range_raw=str(ws.cell(r, h["Range"]).value or "Medium").strip(),
+                base_price=float(ws.cell(r, h["BasePrice_RefYear"]).value or 0.0),
+                units=float(ws.cell(r, h["Units_RefYear"]).value or 0.0),
             )
         )
     return out
+
+
+def pick_focal_product(products: list[ProdRow]) -> ProdRow:
+    if not products:
+        raise ValueError("Aucun produit pour choisir un focal product.")
+    for p in products:
+        if p.segment_idx == 3 and canonical_gamme_label(p.range_raw) == "Premium":
+            return p
+    return max(products, key=lambda p: p.revenue)
 
 
 def firm_ref_revenue(products: list[ProdRow]) -> float:
     return max(sum(p.revenue for p in products), 150_000.0)
-
-
-def pick_focal_product(products: list[ProdRow]) -> ProdRow:
-    for p in products:
-        if p.segment_idx == 3 and str(p.range_raw).lower() == "premium":
-            return p
-    return max(products, key=lambda x: x.revenue)
-
-
-def pick_ave_urbain_medium(products_ave: list[ProdRow]) -> ProdRow:
-    for p in products_ave:
-        if p.segment_idx == 1 and str(p.range_raw).lower() == "medium":
-            return p
-    return max(products_ave, key=lambda x: x.revenue)
-
-
-def scenario_from_product(
-    prod: ProdRow,
-    firm_code: str,
-    period: int,
-    name: str,
-    adj_budget: float,
-    *,
-    promo: float = 0.0,
-    marketing_mult: float = 1.0,
-    production_mult: float = 1.05,
-    sustainability_tranches: int = 1,
-    rd_pct: float | None = None,
-) -> ScenarioInput:
-    seg_key = SEG_IDX_TO_KEY[prod.segment_idx]
-    rng = RANGE_MAP.get(prod.range_raw, "mid")
-    infl = period_inflation_factor(period)
-    price = max(500.0, prod.base_price * infl)
-    seg_sz = segment_size(period, seg_key)
-    production = max(400, int(prod.units * production_mult))
-    mkt_cap = adj_budget * MARKET_CONFIG["constraints"]["marketing_max_pct"]
-    mkt = min(max(adj_budget * 0.08 * marketing_mult, 30_000.0), mkt_cap)
-    rd = adj_budget * (rd_pct if rd_pct is not None else 0.02)
-    allowed = MARKET_CONFIG["constraints"].get("rd_allowed_pcts", [0.02, 0.05, 0.08])
-    if rd_pct is None:
-        rd = adj_budget * 0.02
-    else:
-        rd = adj_budget * rd_pct
-        nearest = min(allowed, key=lambda x: abs(x - rd_pct))
-        rd = adj_budget * nearest
-
-    firm_rep = float(MARKET_CONFIG["firms"][firm_code]["base_rep"])
-
-    return ScenarioInput(
-        firm_name=firm_code,
-        period=period,
-        scenario_name=name,
-        model_name=prod.model_name,
-        product_type=product_type_for_segment(prod.segment_idx),
-        segment=seg_key,
-        model_range=rng,
-        product_status="active",
-        price=round(price, 2),
-        production=production,
-        promotion_rate=promo,
-        marketing_budget=round(mkt, 2),
-        marketing_channels=MarketingChannels(),
-        rd_budget=round(rd, 2),
-        adjusted_budget=round(adj_budget, 2),
-        previous_innovation_score=firm_rep,
-        previous_sustainability_score=5.0,
-        sustainability_tranches=sustainability_tranches,
-        competitor_attractiveness=14.0,
-        opening_stock=0,
-    )
-
-
-def build_scenario_grid(
-    wb: openpyxl.Workbook,
-    primary_firm: str,
-) -> list[tuple[str, str, ScenarioInput]]:
-    """(scenario_id, firm_owner_code, scenario)"""
-    pri_products = load_products(wb, primary_firm)
-    ave_products = load_products(wb, "AVE")
-    focal = pick_focal_product(pri_products)
-    adj_pri = firm_ref_revenue(pri_products)
-    adj_ave = firm_ref_revenue(ave_products)
-    ave_mid = pick_ave_urbain_medium(ave_products)
-
-    grid: list[tuple[str, str, ScenarioInput]] = []
-
-    # Primaire — résultat vedette P2 (aligné usage pédagogique « période 2 »)
-    grid.append(
-        (
-            f"{primary_firm}_FocalPremium_P2",
-            primary_firm,
-            scenario_from_product(
-                focal,
-                primary_firm,
-                2,
-                f"{primary_firm}_FocalPremium_P2",
-                adj_pri,
-                production_mult=1.08,
-                sustainability_tranches=2,
-            ),
-        )
-    )
-
-    s_p1 = scenario_from_product(
-        focal,
-        primary_firm,
-        1,
-        f"{primary_firm}_FocalPremium_P1",
-        adj_pri,
-        production_mult=1.05,
-    )
-    grid.append((f"{primary_firm}_FocalPremium_P1", primary_firm, s_p1))
-
-    # Stratégie figée : même prix/prod/marketing qu’en P1, horizons P4 et P8
-    def freeze(sp: ScenarioInput, per: int, sid: str) -> ScenarioInput:
-        return sp.model_copy(update={"period": per, "scenario_name": sid})
-
-    grid.append((f"{primary_firm}_Figee_P4", primary_firm, freeze(s_p1, 4, f"{primary_firm}_Figee_P4")))
-    grid.append((f"{primary_firm}_Figee_P8", primary_firm, freeze(s_p1, 8, f"{primary_firm}_Figee_P8")))
-
-    for pr in [0.0, -0.02, -0.05, -0.10]:
-        lab = f"Sweep_promo_{int(pr * 100)}pct_AVE"
-        grid.append(
-            (
-                lab,
-                "AVE",
-                scenario_from_product(
-                    ave_mid,
-                    "AVE",
-                    1,
-                    lab,
-                    adj_ave,
-                    promo=pr,
-                    production_mult=1.0,
-                    marketing_mult=1.0,
-                ),
-            )
-        )
-
-    mkt_max = scenario_from_product(
-        focal,
-        primary_firm,
-        1,
-        f"{primary_firm}_Marketing_Max_P1",
-        adj_pri,
-        marketing_mult=1.25,
-    )
-    cap = adj_pri * MARKET_CONFIG["constraints"]["marketing_max_pct"]
-    mkt_max = mkt_max.model_copy(update={"marketing_budget": round(cap, 2)})
-
-    grid.append((f"{primary_firm}_Marketing_Max_P1", primary_firm, mkt_max))
-
-    grid.append(
-        (
-            f"{primary_firm}_RD_5pct_P1",
-            primary_firm,
-            scenario_from_product(
-                focal,
-                primary_firm,
-                1,
-                f"{primary_firm}_RD_5pct_P1",
-                adj_pri,
-                rd_pct=0.05,
-            ),
-        )
-    )
-
-    grid.append(
-        (
-            f"{primary_firm}_Durabilite_2_tranches",
-            primary_firm,
-            scenario_from_product(
-                focal,
-                primary_firm,
-                1,
-                f"{primary_firm}_Durabilite_2_tranches",
-                adj_pri,
-                sustainability_tranches=2,
-            ),
-        )
-    )
-
-    # Variante production plus basse (sous-production volontaire)
-    grid.append(
-        (
-            f"{primary_firm}_SousProduction_P1",
-            primary_firm,
-            scenario_from_product(
-                focal,
-                primary_firm,
-                1,
-                f"{primary_firm}_SousProduction_P1",
-                adj_pri,
-                production_mult=0.72,
-            ),
-        )
-    )
-
-    return grid
-
-
-def fmt_money(x: float) -> str:
-    return f"{int(round(x)):,}".replace(",", " ")
-
-
-def fmt_pct(x: float, dec: int = 1) -> str:
-    return f"{100.0 * x:.{dec}f} %"
-
-
-def run_grid(grid: list[tuple[str, str, ScenarioInput]]) -> list[tuple[str, str, ScenarioInput, Any]]:
-    out = []
-    for sid, owner, scen in grid:
-        out.append((sid, owner, scen, simulate(scen)))
-    out.sort(key=lambda x: x[3].profit, reverse=True)
-    return out
 
 
 def segment_label_from_idx(wb: openpyxl.Workbook, idx: int) -> str:
@@ -385,803 +186,408 @@ def segment_label_from_idx(wb: openpyxl.Workbook, idx: int) -> str:
     return f"Segment {idx}"
 
 
-def growth_rows() -> list[list[str]]:
-    rows = []
+def load_mm_rows(wb: openpyxl.Workbook) -> list[list[str]]:
+    ws = wb["MARKETING_MATRIX"]
+    out: list[list[str]] = []
+    for r in range(2, ws.max_row + 1):
+        if ws.cell(r, 1).value is None:
+            continue
+        out.append([str(ws.cell(r, c).value or "") for c in range(1, 7)])
+    return out
+
+
+def load_firms_market_rows(wb: openpyxl.Workbook) -> list[tuple[str, float, float]]:
+    ws = wb["FIRMS"]
+    rows: list[tuple[str, float, float]] = []
+    for r in range(2, ws.max_row + 1):
+        code = str(ws.cell(r, 1).value or "").strip()
+        if not code:
+            continue
+        rows.append(
+            (
+                code,
+                float(ws.cell(r, 3).value or 0.0),
+                float(ws.cell(r, 4).value or 0.0),
+            )
+        )
+    rows.sort(key=lambda row: row[2], reverse=True)
+    return rows
+
+
+def growth_rows(firm: str) -> tuple[list[list[str]], str]:
+    _ = firm
+    rows: list[list[str]] = []
     p1_tot = total_market_size(1)
-    s3_p1 = segment_size(1, "endurants_performants")
+    seg_key = "endurants_performants"
+    seg_label = "Seg. 3 (Endurants)"
     for p in range(1, 9):
         tot = total_market_size(p)
-        s3 = segment_size(p, "endurants_performants")
+        seg = segment_size(p, seg_key)
         growth = "" if p == 1 else f"+{(tot / p1_tot - 1) * 100:.0f} %"
         rows.append(
             [
                 str(p),
                 str(period_to_year(p)),
                 f"{tot:,.0f}".replace(",", " "),
-                f"{s3:,.0f}".replace(",", " "),
+                f"{seg:,.0f}".replace(",", " "),
                 growth,
             ]
         )
-    return rows
+    return rows, seg_label
 
 
-def section_titles_2_to_8(firm: str) -> list[str]:
-    return [
-        "Contexte concurrentiel — Structure du marché VAE",
-        f"Portefeuille produits {firm} — Analyse par segment",
-        "Analyse des leviers stratégiques",
-        f"Analyse du scénario {firm} — Résultat de référence",
-        "Structure des coûts et marge",
-        "Projection temporelle — Risque d'une stratégie statique",
-        "Recommandations stratégiques",
-    ]
+def _scenario_prefix(firm: str, prod: ProdRow) -> str:
+    clean = "".join(ch if (ch.isalnum() or ch in "_-") else "_" for ch in str(prod.product_key))
+    return f"{firm}_{clean}"[:40]
 
 
-def load_mm_rows(wb: openpyxl.Workbook) -> list[list[str]]:
-    ws_m = wb["MARKETING_MATRIX"]
-    rows: list[list[str]] = []
-    for r in range(2, ws_m.max_row + 1):
-        if ws_m.cell(r, 1).value is None:
-            continue
-        rows.append(
-            [
-                str(ws_m.cell(r, 1).value),
-                str(ws_m.cell(r, 2).value),
-                str(ws_m.cell(r, 3).value),
-                str(ws_m.cell(r, 4).value),
-                str(ws_m.cell(r, 5).value),
-                str(ws_m.cell(r, 6).value),
-            ]
-        )
-    return rows
+def _build_scenario(
+    prod: ProdRow,
+    firm: str,
+    period: int,
+    sid: str,
+    adj_firm_budget: float,
+    *,
+    marketing_mult: float = 1.0,
+    rd_pct: float = 0.02,
+    promo: float = 0.0,
+    production_mult: float = 1.0,
+    sustainability_tranches: int = 0,
+    opening_stock: int = 0,
+    allocation_weight: float = 1.0,
+) -> ScenarioInput:
+    seg_key = SEG_IDX_TO_KEY.get(prod.segment_idx, "urbains_presses")
+    rng = RANGE_MAP.get(canonical_gamme_label(prod.range_raw), "mid")
+    infl = period_inflation_factor(period)
+    price = max(500.0, prod.base_price * infl)
+    production = max(100, int(round(prod.units * production_mult)))
+
+    mkt_cap = adj_firm_budget * MARKET_CONFIG["constraints"]["marketing_max_pct"]
+    firm_mkt = min(max(adj_firm_budget * 0.08 * marketing_mult, 0.0), mkt_cap)
+    rd_ratio = snap_rd_firm_pct(rd_pct)
+    firm_rd = adj_firm_budget * rd_ratio
+    product_mkt = max(firm_mkt * allocation_weight, 0.0)
+    product_rd = max(firm_rd * allocation_weight, 0.0)
+    product_adj = max(adj_firm_budget * allocation_weight, 1.0)
+    rep = float(MARKET_CONFIG["firms"][firm]["base_rep"])
+    return ScenarioInput(
+        firm_name=firm,
+        period=period,
+        scenario_name=sid,
+        model_name=prod.model_name,
+        product_type=product_type_for_segment(prod.segment_idx),
+        segment=seg_key,
+        model_range=rng,
+        product_status="active",
+        marketing_budget=round(product_mkt, 2),
+        marketing_channels=MarketingChannels(),
+        rd_budget=round(product_rd, 2),
+        price=round(price, 2),
+        promotion_rate=promo,
+        production=production,
+        opening_stock=max(0, int(opening_stock)),
+        adjusted_budget=round(product_adj, 2),
+        allocation_weight=allocation_weight,
+        firm_marketing_budget_total=round(firm_mkt, 2),
+        firm_rd_budget_total=round(firm_rd, 2),
+        previous_innovation_score=rep,
+        previous_sustainability_score=5.0,
+        sustainability_tranches=sustainability_tranches,
+        competitor_attractiveness=14.0,
+    )
 
 
-def scenario_prefix(firm: str, prod: ProdRow) -> str:
-    raw = "".join(c if (str(c).isalnum() or c in "_-") else "_" for c in str(prod.product_key))
-    return f"{firm}_{raw}"[:40]
+def scenario_from_product(
+    prod: ProdRow,
+    firm_code: str,
+    period: int,
+    name: str,
+    adj_budget: float,
+    *,
+    products: list[ProdRow] | None = None,
+    marketing_mult: float = 1.0,
+    rd_pct: float = 0.02,
+    promo: float = 0.0,
+    production_mult: float = 1.0,
+    sustainability_tranches: int = 0,
+    opening_stock: int = 0,
+    **_: Any,
+) -> ScenarioInput:
+    """API stable pour excel_2250_reference et scripts externes."""
+    portfolio = products or [prod]
+    total_ref_rev = max(sum(p.revenue for p in portfolio), 1.0)
+    weight = max(prod.revenue / total_ref_rev, 0.01)
+    return _build_scenario(
+        prod,
+        firm_code,
+        period,
+        name,
+        adj_budget,
+        marketing_mult=marketing_mult,
+        rd_pct=rd_pct,
+        promo=promo,
+        production_mult=production_mult,
+        sustainability_tranches=sustainability_tranches,
+        opening_stock=opening_stock,
+        allocation_weight=weight,
+    )
 
 
-def build_product_bundle(prod: ProdRow, firm: str, adj: float) -> dict[str, Any]:
-    pref = scenario_prefix(firm, prod)
-    s_p1 = scenario_from_product(prod, firm, 1, f"{pref}_P1", adj, production_mult=1.05)
-    s_p2 = scenario_from_product(
+def build_scenario_grid(wb: openpyxl.Workbook, primary_firm: str) -> list[tuple[str, str, ScenarioInput]]:
+    products = load_products(wb, primary_firm)
+    if not products:
+        return []
+    focal = pick_focal_product(products)
+    adj = firm_ref_revenue(products)
+    grid: list[tuple[str, str, ScenarioInput]] = []
+    sid_p2 = f"{primary_firm}_FocalPremium_P2"
+    s_p2 = _build_scenario(
+        focal,
+        primary_firm,
+        2,
+        sid_p2,
+        adj,
+        marketing_mult=1.0,
+        rd_pct=0.05,
+        production_mult=1.08,
+        sustainability_tranches=2,
+    )
+    grid.append((sid_p2, primary_firm, s_p2))
+    sid_p1 = f"{primary_firm}_FocalPremium_P1"
+    s_p1 = _build_scenario(focal, primary_firm, 1, sid_p1, adj, production_mult=1.05)
+    grid.append((sid_p1, primary_firm, s_p1))
+    sid_mkt = f"{primary_firm}_Marketing_Max_P1"
+    s_mkt = _build_scenario(focal, primary_firm, 1, sid_mkt, adj, marketing_mult=1.35, production_mult=1.05)
+    grid.append((sid_mkt, primary_firm, s_mkt))
+    sid_rd = f"{primary_firm}_RD_5pct_P2"
+    s_rd = _build_scenario(focal, primary_firm, 2, sid_rd, adj, rd_pct=0.05, production_mult=1.06)
+    grid.append((sid_rd, primary_firm, s_rd))
+    sid_under = f"{primary_firm}_SousProduction_P1"
+    s_under = _build_scenario(focal, primary_firm, 1, sid_under, adj, production_mult=0.72)
+    grid.append((sid_under, primary_firm, s_under))
+    sid_dur = f"{primary_firm}_Durabilite_2_tranches"
+    s_dur = _build_scenario(
+        focal,
+        primary_firm,
+        1,
+        sid_dur,
+        adj,
+        production_mult=1.02,
+        sustainability_tranches=2,
+    )
+    grid.append((sid_dur, primary_firm, s_dur))
+    s_p4 = s_p1.model_copy(update={"period": 4, "scenario_name": f"{primary_firm}_Figee_P4"})
+    s_p8 = s_p1.model_copy(update={"period": 8, "scenario_name": f"{primary_firm}_Figee_P8"})
+    grid.append((s_p4.scenario_name, primary_firm, s_p4))
+    grid.append((s_p8.scenario_name, primary_firm, s_p8))
+    return grid
+
+
+def run_grid(grid: list[tuple[str, str, ScenarioInput]]) -> list[tuple[str, str, ScenarioInput, SimulationResult]]:
+    out: list[tuple[str, str, ScenarioInput, SimulationResult]] = []
+    for sid, owner, sc in grid:
+        out.append((sid, owner, sc, simulate(sc)))
+    out.sort(key=lambda row: row[3].profit, reverse=True)
+    return out
+
+
+def firm_scenario_results(
+    results: list[tuple[str, str, ScenarioInput, SimulationResult]],
+    firm: str,
+) -> list[tuple[str, str, ScenarioInput, SimulationResult]]:
+    return [row for row in results if row[1] == firm]
+
+
+def firm_adjusted_budget_from_scenario(scen: ScenarioInput) -> float:
+    w = max(float(scen.allocation_weight), 1e-9)
+    return float(scen.adjusted_budget) / w
+
+
+def _projection_1500_2250_3000(ref_scen: ScenarioInput) -> list[tuple[int, SimulationResult]]:
+    out: list[tuple[int, SimulationResult]] = []
+    for units in (1500, 2250, 3000):
+        sc = ref_scen.model_copy(update={"production": units, "scenario_name": f"{ref_scen.scenario_name}_proj_{units}"})
+        out.append((units, simulate(sc)))
+    return out
+
+
+def _build_product_bundle(prod: ProdRow, firm: str, adj_firm: float, allocation_weight: float) -> dict[str, Any]:
+    pref = _scenario_prefix(firm, prod)
+    ref_scen = _build_scenario(
         prod,
         firm,
         2,
         f"{pref}_P2ref",
-        adj,
+        adj_firm,
+        rd_pct=0.05,
         production_mult=1.08,
         sustainability_tranches=2,
+        allocation_weight=allocation_weight,
     )
-
-    def freeze(sp: ScenarioInput, per: int, name: str) -> ScenarioInput:
-        return sp.model_copy(update={"period": per, "scenario_name": name})
-
-    s_p4 = freeze(s_p1, 4, f"{pref}_FigP4")
-    s_p8 = freeze(s_p1, 8, f"{pref}_FigP8")
-    cap = adj * MARKET_CONFIG["constraints"]["marketing_max_pct"]
-    s_mkt = scenario_from_product(
-        prod, firm, 1, f"{pref}_MktMax", adj, production_mult=1.05, marketing_mult=1.25
-    )
-    s_mkt = s_mkt.model_copy(update={"marketing_budget": round(cap, 2)})
-    s_promo = s_p1.model_copy(update={"promotion_rate": -0.05, "scenario_name": f"{pref}_Promo5"})
-    s_under = scenario_from_product(prod, firm, 1, f"{pref}_SousProd", adj, production_mult=0.72)
-    lever_specs = [
-        ("Référence P1", s_p1),
-        ("Marketing plafond", s_mkt),
-        ("Promo −5 %", s_promo),
-        ("Sous-production (−28 %)", s_under),
+    ref_res = simulate(ref_scen)
+    lever_scenarios = [
+        ("Référence P1", _build_scenario(prod, firm, 1, f"{pref}_P1", adj_firm, production_mult=1.05, allocation_weight=allocation_weight)),
+        (
+            "Marketing maximum",
+            _build_scenario(prod, firm, 1, f"{pref}_MktMax", adj_firm, marketing_mult=1.35, production_mult=1.05, allocation_weight=allocation_weight),
+        ),
+        (
+            "Promotion -5 %",
+            _build_scenario(prod, firm, 1, f"{pref}_Promo5", adj_firm, promo=-0.05, production_mult=1.05, allocation_weight=allocation_weight),
+        ),
+        (
+            "Sous-production (-28 %)",
+            _build_scenario(prod, firm, 1, f"{pref}_SousProd", adj_firm, production_mult=0.72, allocation_weight=allocation_weight),
+        ),
     ]
-    levers: list[tuple[str, SimulationResult]] = [(lab, simulate(sc)) for lab, sc in lever_specs]
-    ref_res = simulate(s_p2)
+    levers = [(lab, simulate(sc), sc) for lab, sc in lever_scenarios]
+    r_p1 = levers[0][1]
+    s_p4 = lever_scenarios[0][1].model_copy(update={"period": 4, "scenario_name": f"{pref}_FigP4"})
+    s_p8 = lever_scenarios[0][1].model_copy(update={"period": 8, "scenario_name": f"{pref}_FigP8"})
+    grouped = build_prioritized_alerts(scenario=ref_scen, result=ref_res, product=prod)
     return {
-        "ref_scen": s_p2,
+        "prod": prod,
+        "ref_scen": ref_scen,
         "ref_res": ref_res,
-        "levers": levers,
-        "r_p1": levers[0][1],
+        "levers": [(lab, res) for lab, res, _ in levers],
+        "lever_scenarios": [(lab, sc) for lab, _, sc in levers],
+        "r_p1": r_p1,
         "r_p4": simulate(s_p4),
         "r_p8": simulate(s_p8),
+        "alerts_grouped": grouped,
+        "alerts": flatten_prioritized_alerts(grouped),
+        "projection_1500_2250_3000": _projection_1500_2250_3000(ref_scen),
     }
 
 
-def append_toc_multi_scope(story: list, firm: str, legend: str, prods: list[ProdRow]) -> None:
-    titles = section_titles_2_to_8(firm)
-    sub_style = ParagraphStyle(
-        "TOC_PART",
-        parent=P_INS,
-        fontName="Helvetica-Bold",
-        fontSize=9.5,
-        textColor=NAVY,
-        spaceBefore=8,
-        spaceAfter=2,
-    )
-    story.append(Paragraph("<b>Table des matières</b>", P_INS))
-    story.append(Spacer(1, 6))
-    story.append(Paragraph("<b>1.</b> Tableau de bord global — scénarios simulés", P_TOC))
-    story.append(Paragraph(pdf_escape(f"Vue firme — {legend}"), sub_style))
-    for i, t in enumerate(titles, start=2):
-        story.append(Paragraph(f"<b>{i}.</b> {pdf_escape(t)}", P_TOC))
-    for p in prods:
-        story.append(
-            Paragraph(
-                pdf_escape(f"Vue modèle — {p.product_key} — {p.model_name[:52]}"),
-                sub_style,
-            )
-        )
-        for i, t in enumerate(titles, start=2):
-            story.append(Paragraph(f"<b>{i}.</b> {pdf_escape(t)}", P_TOC))
-    story.append(Spacer(1, 6))
-    story.append(Paragraph("<b>9.</b> Synthèse décisionnelle et conclusion", P_TOC))
-    story.append(PageBreak())
+def _safe_cross_matrix(firm: str, scen: ScenarioInput) -> dict[str, Any]:
+    return build_cross_matrix_pct_total_market(period=1, user_firm=firm, user_scenario=scen)
 
 
-def append_section_2_contexte_firm(story: list, wb: openpyxl.Workbook, firm: str, w: float) -> None:
-    H1(story, "2. Contexte concurrentiel — Structure du marché VAE")
-    intro_mkt = (
-        f"La simulation s’appuie sur <b>9 firmes</b> et <b>6 segments</b>. Les parts relatives ci-dessous "
-        f"sont lues dans la feuille <b>FIRMS</b> du classeur (Share_RefYear). Le marché total de référence "
-        f"est de <b>110 000</b> unités (PARAM / configuration), avec croissance <b>12 %</b> par an."
-    )
-    story.append(Paragraph(intro_mkt, P_JUST))
-    story.append(Spacer(1, 8))
-
-    ws_f = wb["FIRMS"]
-    firm_rows = []
-    for r in range(2, ws_f.max_row + 1):
-        code = ws_f.cell(r, 1).value
-        if not code:
-            continue
-        u = ws_f.cell(r, 3).value
-        sh = ws_f.cell(r, 4).value
-        firm_rows.append([str(code), f"{float(u or 0):,.0f}".replace(",", " "), fmt_pct(float(sh or 0))])
-    firm_rows.sort(
-        key=lambda x: float(x[2].replace(" %", "").replace(",", ".").replace(" ", "")),
-        reverse=True,
-    )
-    story.append(Paragraph("<b>2.1 Parts de marché relatives — année de référence</b>", P_INS))
-    story.append(Spacer(1, 4))
-    story.append(
-        table_standard(
-            ["Firme", "Unités (réf.)", "PDM"],
-            firm_rows,
-            [w * 0.28, w * 0.36, w * 0.36],
-        )
-    )
-
-    ws_s = wb["SEGMENTS"]
-    seg_rows = []
-    for r in range(2, ws_s.max_row + 1):
-        idx = ws_s.cell(r, 1).value
-        if idx is None:
-            continue
-        seg_rows.append(
-            [
-                str(idx),
-                str(ws_s.cell(r, 2).value or ""),
-                fmt_pct(float(ws_s.cell(r, 3).value or 0)),
-                f"{float(ws_s.cell(r, 5).value or 0):,.0f}".replace(",", " "),
-                f"{float(ws_s.cell(r, 4).value or 0):,.0f}".replace(",", " ") + " $",
-                fmt_pct(float(ws_s.cell(r, 6).value or 0)),
-            ]
-        )
-    story.append(Spacer(1, 10))
-    story.append(Paragraph("<b>2.2 Structure du marché par segment</b>", P_INS))
-    story.append(Spacer(1, 4))
-    story.append(
-        table_standard(
-            ["Seg.", "Description", "Part", "Unités réf.", "Prix préf.", "Online"],
-            seg_rows,
-            [w * 0.06, w * 0.30, w * 0.10, w * 0.14, w * 0.14, w * 0.10],
-        )
-    )
-
-    story.append(Spacer(1, 10))
-    story.append(Paragraph("<b>2.3 Croissance du marché — projection P1–P8</b>", P_INS))
-    story.append(Spacer(1, 4))
-    gr = growth_rows()
-    story.append(
-        table_standard(
-            ["Période", "Année", "Marché total", "Seg. 3 (Endurants)", "Croiss. vs P1"],
-            gr,
-            [w * 0.12, w * 0.12, w * 0.22, w * 0.22, w * 0.22],
-        )
-    )
-    story.append(PageBreak())
-
-
-def append_section_2_contexte_model(
-    story: list, wb: openpyxl.Workbook, firm: str, w: float, prod: ProdRow, legend: str
-) -> None:
-    H1(story, "2. Contexte concurrentiel — Structure du marché VAE")
-    seg_lab = segment_label_from_idx(wb, prod.segment_idx)
-    story.append(
-        Paragraph(
-            f"<b>Vue modèle ({pdf_xml_fragment(prod.product_key)}).</b> Le cadre concurrentiel est identique à la partie firme ; "
-            f"ici on met l’accent sur le <b>segment {prod.segment_idx}</b> ({pdf_xml_fragment(seg_lab)}), où est positionné ce produit.",
-            P_JUST,
-        )
-    )
-    story.append(Spacer(1, 8))
-    ws_s = wb["SEGMENTS"]
-    focus_row = None
-    for r in range(2, ws_s.max_row + 1):
-        if ws_s.cell(r, 1).value == prod.segment_idx:
-            focus_row = [
-                str(ws_s.cell(r, 1).value),
-                str(ws_s.cell(r, 2).value or ""),
-                fmt_pct(float(ws_s.cell(r, 3).value or 0)),
-                f"{float(ws_s.cell(r, 5).value or 0):,.0f}".replace(",", " "),
-                f"{float(ws_s.cell(r, 4).value or 0):,.0f}".replace(",", " ") + " $",
-                fmt_pct(float(ws_s.cell(r, 6).value or 0)),
-            ]
-            break
-    if focus_row:
-        story.append(Paragraph("<b>2.1 Segment cible du modèle</b>", P_INS))
-        story.append(Spacer(1, 4))
-        story.append(
-            table_standard(
-                ["Seg.", "Description", "Part", "Unités réf.", "Prix préf.", "Online"],
-                [focus_row],
-                [w * 0.06, w * 0.30, w * 0.10, w * 0.14, w * 0.14, w * 0.10],
-            )
-        )
-    story.append(Spacer(1, 10))
-    story.append(Paragraph("<b>2.2 Rappel — croissance globale P1–P8</b>", P_INS))
-    story.append(Spacer(1, 4))
-    story.append(
-        table_standard(
-            ["Période", "Année", "Marché total", "Seg. 3 (Endurants)", "Croiss. vs P1"],
-            growth_rows(),
-            [w * 0.12, w * 0.12, w * 0.22, w * 0.22, w * 0.22],
-        )
-    )
-    story.append(
-        Paragraph(
-            pdf_escape(
-                f"Les tableaux détaillés FIRMS / SEGMENTS complets figurent dans la vue firme ({legend})."
-            ),
-            P_SMALL,
-        )
-    )
-    story.append(PageBreak())
-
-
-def append_section_3_portefeuille_firm(
-    story: list, wb: openpyxl.Workbook, firm: str, w: float, prods: list[ProdRow], focal_prod: ProdRow
-) -> None:
-    H1(story, f"3. Portefeuille produits {firm} — Analyse par segment")
-    port_rows = []
-    for p in prods:
-        port_rows.append(
-            [
-                p.product_key,
-                p.model_name[:32],
-                f"{p.segment_idx} — {segment_label_from_idx(wb, p.segment_idx)[:22]}",
-                p.range_raw,
-                f"{p.base_price:,.0f}".replace(",", " ") + " $",
-                f"{p.units:,.0f}".replace(",", " "),
-            ]
-        )
-    story.append(
-        table_standard(
-            ["Code", "Nom produit", "Segment", "Gamme", "Prix réf.", "Unités réf."],
-            port_rows,
-            [w * 0.10, w * 0.28, w * 0.26, w * 0.12, w * 0.12, w * 0.12],
-        )
-    )
-    story.append(
-        Paragraph(
-            pdf_escape(
-                f"Ligne stratégique mise en avant dans les scénarios agrégés : {focal_prod.product_key} — "
-                f"{focal_prod.model_name} (segment {focal_prod.segment_idx}, gamme {focal_prod.range_raw})."
-            ),
-            P_SMALL,
-        )
-    )
-    story.append(PageBreak())
-
-
-def append_section_3_portefeuille_model(story: list, wb: openpyxl.Workbook, firm: str, w: float, prod: ProdRow) -> None:
-    H1(story, f"3. Portefeuille produits {firm} — Analyse par segment")
-    story.append(
-        Paragraph(
-            f"<b>Focus modèle.</b> Analyse restreinte à la référence <b>{pdf_xml_fragment(prod.product_key)}</b> ; "
-            f"le portefeuille complet est présenté dans la partie firme.",
-            P_JUST,
-        )
-    )
-    story.append(Spacer(1, 8))
-    row = [
-        prod.product_key,
-        prod.model_name[:36],
-        f"{prod.segment_idx} — {segment_label_from_idx(wb, prod.segment_idx)[:24]}",
-        prod.range_raw,
-        f"{prod.base_price:,.0f}".replace(",", " ") + " $",
-        f"{prod.units:,.0f}".replace(",", " "),
-    ]
-    story.append(
-        table_standard(
-            ["Code", "Nom produit", "Segment", "Gamme", "Prix réf.", "Unités réf."],
-            [row],
-            [w * 0.10, w * 0.28, w * 0.26, w * 0.12, w * 0.12, w * 0.12],
-        )
-    )
-    story.append(PageBreak())
-
-
-def append_section_4_leviers_firm(
-    story: list, results: list[tuple[str, str, ScenarioInput, Any]], firm: str, w: float, mm_rows: list[list[str]]
-) -> None:
-    H1(story, "4. Analyse des leviers stratégiques")
-
-    sweep_rows = []
-    for sid, owner, scen, res in results:
-        if sid.startswith("Sweep_promo") and owner == "AVE":
-            sweep_rows.append(
-                [
-                    sid.replace("Sweep_promo_", "").replace("_AVE", ""),
-                    f"{scen.price * (1 + scen.promotion_rate):,.0f}".replace(",", " ") + " $",
-                    fmt_money(res.revenue),
-                    fmt_money(res.profit),
-                    fmt_pct(res.margin),
-                    fmt_pct(res.service_rate, 0),
-                    f"{max(0, res.demand - res.sales):,.0f}".replace(",", " "),
-                ]
-            )
-    if sweep_rows:
-        story.append(
-            Paragraph(
-                "<b>4.1 Impact de la promotion (sweep, firme AVE, produit urbain milieu de gamme, P1)</b>",
-                P_INS,
-            )
-        )
-        story.append(Spacer(1, 4))
-        story.append(
-            table_standard(
-                ["Promo", "Prix net", "CA ($)", "Profit ($)", "Marge", "Service", "Écart demande"],
-                sweep_rows,
-                [w * 0.12, w * 0.14, w * 0.14, w * 0.14, w * 0.10, w * 0.09, w * 0.13],
-            )
-        )
-
-    story.append(Spacer(1, 12))
-    story.append(
-        Paragraph(
-            "<b>4.2 Marketing — coefficients par canal (feuille MARKETING_MATRIX)</b>",
-            P_INS,
-        )
-    )
-    story.append(Spacer(1, 4))
-    story.append(
-        table_standard(
-            ["Segment", "Digital", "Social", "Influenceur", "Affichage", "Événements"],
-            mm_rows,
-            [w * 0.14, w * 0.14, w * 0.14, w * 0.16, w * 0.14, w * 0.14],
-        )
-    )
-
-    story.append(Spacer(1, 10))
-    story.append(Paragraph("<b>4.3 Sous-production — indicateurs sur scénarios représentatifs</b>", P_INS))
-    story.append(Spacer(1, 4))
-    sub_prod_rows = []
-    for sid, owner, scen, res in results:
-        if owner != firm:
-            continue
-        if sid in (f"{firm}_SousProduction_P1", f"{firm}_Figee_P4", f"{firm}_Figee_P8", f"{firm}_FocalPremium_P1"):
-            lost = max(0.0, res.demand - res.sales)
-            sub_prod_rows.append(
-                [
-                    sid.replace("_", " ")[:30],
-                    str(scen.production),
-                    f"{lost:,.0f}".replace(",", " "),
-                    fmt_pct(res.service_rate, 0),
-                ]
-            )
-    story.append(
-        table_standard(
-            ["Scénario", "Production", "Écart demande", "Service"],
-            sub_prod_rows,
-            [w * 0.38, w * 0.18, w * 0.22, w * 0.22],
-        )
-    )
-    story.append(PageBreak())
-
-
-def append_section_4_leviers_model(
-    story: list, firm: str, w: float, prod: ProdRow, bundle: dict[str, Any], mm_rows: list[list[str]]
-) -> None:
-    H1(story, "4. Analyse des leviers stratégiques")
-    story.append(
-        Paragraph(
-            f"<b>Vue modèle {pdf_xml_fragment(prod.product_key)}.</b> Quatre tirages sur la même base calée Excel "
-            f"(P1), pour isoler marketing, prix et capacité.",
-            P_JUST,
-        )
-    )
-    story.append(Spacer(1, 8))
-    rows = []
-    for lab, res in bundle["levers"]:
-        rows.append(
-            [
-                lab,
-                str(res.sales),
-                fmt_money(res.revenue),
-                fmt_money(res.profit),
-                fmt_pct(res.margin),
-                fmt_pct(res.service_rate, 0),
-                f"{max(0, res.demand - res.sales):,.0f}".replace(",", " "),
-            ]
-        )
-    story.append(Paragraph("<b>4.1 Leviers simulés — même produit, décisions distinctes (P1)</b>", P_INS))
-    story.append(Spacer(1, 4))
-    story.append(
-        table_standard(
-            ["Levier", "Ventes", "CA ($)", "Profit ($)", "Marge", "Service", "Écart demande"],
-            rows,
-            [w * 0.22, w * 0.08, w * 0.13, w * 0.13, w * 0.10, w * 0.09, w * 0.12],
-        )
-    )
-    seg_focus = str(prod.segment_idx)
-    mm_line = next((r for r in mm_rows if r[0] == seg_focus), None)
-    story.append(Spacer(1, 12))
-    story.append(
-        Paragraph(
-            "<b>4.2 Marketing — coefficients du segment du modèle (MARKETING_MATRIX)</b>",
-            P_INS,
-        )
-    )
-    story.append(Spacer(1, 4))
-    if mm_line:
-        story.append(
-            table_standard(
-                ["Segment", "Digital", "Social", "Influenceur", "Affichage", "Événements"],
-                [mm_line],
-                [w * 0.14, w * 0.14, w * 0.14, w * 0.16, w * 0.14, w * 0.14],
-            )
-        )
-    else:
-        story.append(Paragraph("Ligne segment introuvable dans MARKETING_MATRIX.", P_SMALL))
-    story.append(PageBreak())
-
-
-def append_section_5_reference(
-    story: list,
-    w: float,
-    *,
-    firm: str,
-    legend: str,
-    prod: ProdRow,
-    ref_scen: ScenarioInput,
-    ref_res: SimulationResult,
-    ref_label: str,
-) -> None:
-    H1(story, f"5. Analyse du scénario {firm} — Résultat de référence")
-    story.append(
-        Paragraph(
-            f"Calibrage analysé : <b>{pdf_xml_fragment(ref_label)}</b> — produit <b>{pdf_xml_fragment(prod.product_key)}</b> "
-            f"({pdf_xml_fragment(prod.model_name)}), période moteur <b>{ref_scen.period}</b> ({period_to_year(ref_scen.period)}).",
-            P_JUST,
-        )
-    )
-    story.append(Spacer(1, 8))
-    param_pairs = [
-        ("Firme", legend),
-        ("Produit", f"{prod.product_key} — {prod.model_name}"),
-        ("Segment", SEG_IDX_TO_KEY[prod.segment_idx]),
-        ("Gamme", prod.range_raw),
-        ("Période", f"{ref_scen.period} ({period_to_year(ref_scen.period)})"),
-        ("Prix catalogue", f"{fmt_money(ref_scen.price)} $"),
-        ("Promotion", fmt_pct(ref_scen.promotion_rate)),
-        ("Production", f"{ref_scen.production} unités"),
-        ("Marketing", f"{fmt_money(ref_scen.marketing_budget)} $"),
-        ("Recherche et développement", f"{fmt_money(ref_scen.rd_budget)} $"),
-    ]
-    story.append(
-        table_standard(
-            ["Paramètre", "Valeur"],
-            [[pdf_escape(a), pdf_escape(b)] for a, b in param_pairs],
-            [w * 0.38, w * 0.62],
-        )
-    )
-    story.append(Spacer(1, 8))
-    kpi_ref = [
-        ("Ventes", f"{ref_res.sales} u."),
-        ("CA", f"{fmt_money(ref_res.revenue)} $"),
-        ("Profit", f"{fmt_money(ref_res.profit)} $"),
-        ("Marge", fmt_pct(ref_res.margin)),
-        ("PDM segment", fmt_pct(ref_res.market_share_segment)),
-        ("PDM globale", fmt_pct(ref_res.market_share)),
-        ("Taux de service", fmt_pct(ref_res.service_rate, 0)),
-        ("Stock final (est.)", f"{ref_res.forecast_ending_stock_units} u."),
-        ("Coût stockage (est.)", f"{fmt_money(ref_res.inventory_carrying_cost)} $"),
-    ]
-    story.append(
-        table_standard(
-            ["KPI", "Résultat"],
-            [[pdf_escape(a), pdf_escape(b)] for a, b in kpi_ref],
-            [w * 0.42, w * 0.58],
-        )
-    )
-    story.append(PageBreak())
-
-
-def append_section_6_costs(story: list, w: float, prod: ProdRow) -> None:
-    H1(story, "6. Structure des coûts et marge")
-    rng_key = RANGE_MAP.get(prod.range_raw, "mid")
-    rc = MARKET_CONFIG["ranges"][rng_key]
-    cog = MARKET_CONFIG["cogs_ratios"][rng_key]
-    story.append(
-        Paragraph(
-            pdf_escape(
-                f"Gamme moteur « {prod.range_raw} » (modèle {prod.product_key}) : COGS ~ {cog*100:.0f} % du prix net, "
-                f"distribution magasin {rc['distribution_rate']*100:.0f} % du CA (principalement). "
-                f"SAV et frais généraux sont indexés sur le budget ajusté (proxy CA ref.)."
-            ),
-            P_JUST,
-        )
-    )
-    cost_rows = [
-        ["COGS (production)", f"{cog*100:.0f} % du prix net", f"{cog*100:.1f} %"],
-        ["Distribution", f"{rc['distribution_rate']*100:.0f} % du CA hors prime", f"{rc['distribution_rate']*100:.1f} %"],
-        ["Marketing et recherche et développement", "Budgets déclarés", "—"],
-        ["Stockage (est.)", "Règle diagnostics stock", "voir KPI"],
-    ]
-    story.append(Spacer(1, 8))
-    story.append(
-        table_standard(
-            ["Poste", "Règle", "% indicatif"],
-            cost_rows,
-            [w * 0.28, w * 0.52, w * 0.20],
-        )
-    )
-    story.append(PageBreak())
-
-
-def append_section_7_projection(
-    story: list, w: float, r_p1: SimulationResult, r_p4: SimulationResult, r_p8: SimulationResult, scope_note: str
-) -> None:
-    H1(story, "7. Projection temporelle — Risque d'une stratégie statique")
-    story.append(Paragraph(pdf_escape(scope_note), P_JUST))
-    story.append(Spacer(1, 8))
-    proj_rows = [
-        ["Profit ($)", fmt_money(r_p1.profit), fmt_money(r_p4.profit), fmt_money(r_p8.profit)],
-        ["Marge", fmt_pct(r_p1.margin), fmt_pct(r_p4.margin), fmt_pct(r_p8.margin)],
-        ["PDM globale", fmt_pct(r_p1.market_share), fmt_pct(r_p4.market_share), fmt_pct(r_p8.market_share)],
-        ["Service", fmt_pct(r_p1.service_rate, 0), fmt_pct(r_p4.service_rate, 0), fmt_pct(r_p8.service_rate, 0)],
-    ]
-    story.append(
-        table_standard(
-            ["Indicateur", "P1", "P4", "P8"],
-            proj_rows,
-            [w * 0.28, w * 0.24, w * 0.24, w * 0.24],
-        )
-    )
-    story.append(PageBreak())
-
-
-def append_section_8_recommandations_firm(
-    story: list,
-    legend: str,
-    ref_res: SimulationResult,
-    focal_prod: ProdRow,
-    mm_rows: list[list[str]],
-    results: list[tuple[str, str, ScenarioInput, Any]],
-) -> None:
-    H1(story, "8. Recommandations stratégiques")
-    story.append(
-        Paragraph(
-            f"<b>Vue firme.</b> Synthèse pour <b>{pdf_xml_fragment(legend)}</b> à partir du scénario vedette et du maillage multi-scénarios ; "
-            f"chaque fiche modèle qui suit renouvelle les sections 2 à 8 au niveau de la référence produit.",
-            P_JUST,
-        )
-    )
-    story.append(Spacer(1, 8))
-    recs: list[str] = []
-    if ref_res.service_rate < 0.95:
-        recs.append(
-            "<b>1. Monter en capacité.</b> Le scénario de référence n’atteint pas 100 % de service : "
-            "augmenter la production ou le stock de départ pour limiter les ventes perdues."
-        )
-    else:
-        recs.append(
-            "<b>1. Capacité.</b> Bon taux de service sur le scénario vedette ; sécuriser une marge sur "
-            "stock final pour absorber les oscillations de demande."
-        )
-
-    seg_focus = focal_prod.segment_idx
-    mm_line = next((r for r in mm_rows if r[0] == str(seg_focus)), None)
-    if mm_line:
-        recs.append(
-            f"<b>2. Marketing.</b> Sur le segment {seg_focus}, les coefficients MARKETING_MATRIX suggèrent "
-            f"d’allouer prioritairement les postes aux meilleurs coefficients relatifs "
-            f"(Digital {mm_line[1]}, Influenceur {mm_line[3]}, …)."
-        )
-
-    best_promo_row = next((x for x in results if x[0] == "Sweep_promo_0pct_AVE"), None)
-    worst_promo_row = next((x for x in results if x[0] == "Sweep_promo_-10pct_AVE"), None)
-    if best_promo_row and worst_promo_row:
-        delta_p = best_promo_row[3].profit - worst_promo_row[3].profit
-        recs.append(
-            f"<b>3. Prix / promotion.</b> Sur le produit AVE de sweep, l’écart de profit entre 0 % et −10 % "
-            f"de promo est d’environ <b>{fmt_money(delta_p)} $</b> — toute remise doit être assortie "
-            f"d’une hausse de volume utile (production)."
-        )
-
-    recs.append(
-        "<b>4. Adaptation périodique.</b> Les scénarios « Figée » montrent la dérive possible si les décisions "
-        "ne sont pas révisées alors que le marché grossit (+12 % / an)."
-    )
-
-    recs.append(
-        "<b>5. Cohérence prix / gamme.</b> Vérifier dans Excel les planchers par gamme (CONTROLE_DECISIONS / "
-        "règles prix) pour éviter les pénalités PriceFit."
-    )
-
-    for r in recs:
-        story.append(Paragraph(r, P_JUST))
-        story.append(Spacer(1, 6))
-
-
-def append_section_8_recommandations_model(
-    story: list, prod: ProdRow, bundle: dict[str, Any], mm_rows: list[list[str]]
-) -> None:
-    H1(story, "8. Recommandations stratégiques")
-    ref_res: SimulationResult = bundle["ref_res"]
-    levers: list[tuple[str, SimulationResult]] = bundle["levers"]
-    best_lab, best_r = max(levers, key=lambda x: x[1].profit)
-    story.append(
-        Paragraph(
-            f"<b>Vue modèle {pdf_xml_fragment(prod.product_key)}.</b> Levier le plus rentable sur les quatre tirages : "
-            f"<b>{pdf_xml_fragment(best_lab)}</b> (profit {fmt_money(best_r.profit)} $).",
-            P_JUST,
-        )
-    )
-    story.append(Spacer(1, 8))
-    recs: list[str] = []
-    if ref_res.service_rate < 0.95:
-        recs.append(
-            "<b>1. Capacité.</b> Sur la référence P2 de ce modèle, le service est sous le plafond : "
-            "prioriser production ou stock pour ce segment avant d’accentuer les remises."
-        )
-    else:
-        recs.append(
-            "<b>1. Capacité.</b> Service élevé sur la référence ; surveiller le stock final pour limiter les coûts de stockage."
-        )
-    mm_line = next((r for r in mm_rows if r[0] == str(prod.segment_idx)), None)
-    if mm_line:
-        recs.append(
-            f"<b>2. Marketing.</b> Segment {prod.segment_idx} : adapter le mix aux coefficients "
-            f"(Digital {mm_line[1]}, Influenceurs {mm_line[3]}, …)."
-        )
-    ref_p1 = levers[0][1]
-    promo_r = levers[2][1]
-    if promo_r.profit > ref_p1.profit:
-        recs.append(
-            "<b>3. Prix.</b> La promo −5 % améliore le profit vs référence P1 sur ce modèle : "
-            "la demande réagit favorablement à ce niveau de remise."
-        )
-    elif promo_r.profit < ref_p1.profit:
-        recs.append(
-            "<b>3. Prix.</b> La promo −5 % dégrade le profit vs référence : protéger la marge ou compenser par volume/cross-sell."
-        )
-    recs.append(
-        "<b>4. Horizon.</b> Réviser prix et capacité à chaque période : la projection P4/P8 montre la sensibilité "
-        "à une stratégie figée."
-    )
-    for r in recs:
-        story.append(Paragraph(r, P_JUST))
-        story.append(Spacer(1, 6))
-
-
-def main():
-    ap = argparse.ArgumentParser(description="Rapport analyse stratégique style rapport_vae.pdf")
-    ap.add_argument(
-        "--firm",
-        default="TRE",
-        help="Code firme (AVE, CAN, …). « VAE » est accepté comme alias de AVE.",
-    )
-    ap.add_argument("--workbook", type=Path, default=DEFAULT_XLSX)
-    ap.add_argument("--out", type=Path, default=None)
-    args = ap.parse_args()
-
-    firm = resolve_firm_code(args.firm)
-    if firm not in MARKET_CONFIG["firms"]:
-        raise SystemExit(
-            f"Firme inconnue : {args.firm!r}. Codes valides : {', '.join(sorted(MARKET_CONFIG['firms']))} (VAE → AVE)."
-        )
-    xlsx = args.workbook.expanduser()
-    if not xlsx.exists():
-        raise SystemExit(f"Classeur introuvable : {xlsx}")
-
+def build_report_payload(xlsx: Path, firm: str) -> dict[str, Any]:
     wb = openpyxl.load_workbook(xlsx, data_only=True)
+    produits = load_products(wb, firm)
+    if not produits:
+        wb.close()
+        raise ValueError(f"Aucun produit trouvé pour la firme {firm}.")
+    focal_prod = pick_focal_product(produits)
+    mm_rows = load_mm_rows(wb)
     grid = build_scenario_grid(wb, firm)
     results = run_grid(grid)
-
-    prods = load_products(wb, firm)
-    focal_prod = pick_focal_product(prods)
-    adj_pri = firm_ref_revenue(prods)
-    mm_rows = load_mm_rows(wb)
-    product_bundles = {p.product_key: build_product_bundle(p, firm, adj_pri) for p in prods}
-    legend = FIRM_LEGEND.get(firm, f"{firm} ({firm})")
-    footer = f"Rapport de Simulation VAE — {legend} — Usage interne"
-
-    best_sid, best_owner, best_scen, best_res = results[0]
-    worst_sid, worst_owner, worst_scen, worst_res = results[-1]
-    max_margin = max(r[3].margin for r in results)
-
-    primary_rows = [x for x in results if x[1] == firm]
-    primary_rows.sort(key=lambda x: x[3].profit, reverse=True)
-    best_primary = primary_rows[0] if primary_rows else results[0]
-
-    # Résumé exécutif (style narratif)
-    n_scen = len(results)
-    n_models = len(prods)
-    exec_txt = (
-        f"<b>Résumé exécutif.</b> Rapport VAE pour <b>{pdf_escape(legend)}</b>. "
-        f"<b>{n_scen} scénarios</b> agrégés (grille multi-scénarios, produit vedette) ; puis, pour chaque référence "
-        f"catalogue (<b>{n_models} modèle(s)</b>), les sections <b>2 à 8</b> sont rejouées : "
-        f"contexte marché, portefeuille, leviers, résultat de référence, structure des coûts, projection « figée » "
-        f"et recommandations. Meilleur profit global : <b>{pdf_escape(best_sid)}</b> "
-        f"({fmt_money(best_res.profit)} $). "
-        f"Meilleur scénario primaire {firm} : <b>{pdf_escape(best_primary[0])}</b> "
-        f"({fmt_money(best_primary[3].profit)} $). Croissance marché <b>12 %</b> / an (PARAM)."
+    firm_rows = firm_scenario_results(results, firm)
+    if not firm_rows:
+        wb.close()
+        raise ValueError(f"Aucun scénario pour la firme {firm}.")
+    sid_ref, _owner_ref, ref_scen, ref_res = next((r for r in firm_rows if "_FocalPremium_P2" in r[0]), firm_rows[0])
+    adj_firm = firm_adjusted_budget_from_scenario(ref_scen)
+    total_ref_rev = max(sum(p.revenue for p in produits), 1.0)
+    product_bundles: dict[str, dict[str, Any]] = {}
+    for prod in produits:
+        w = max(prod.revenue / total_ref_rev, 0.01)
+        product_bundles[prod.product_key] = _build_product_bundle(prod, firm, adj_firm, w)
+    r_p1 = next((r[3] for r in firm_rows if "_FocalPremium_P1" in r[0]), ref_res)
+    r_p4 = next((r[3] for r in firm_rows if "_Figee_P4" in r[0]), ref_res)
+    r_p8 = next((r[3] for r in firm_rows if "_Figee_P8" in r[0]), ref_res)
+    recommandations_firme = build_firm_recommendations(
+        firm=firm,
+        legend=FIRM_LEGEND.get(firm, firm),
+        prods=produits,
+        focal_prod=focal_prod,
+        ref_scen=ref_scen,
+        ref_res=ref_res,
+        r_p8=r_p8,
+        results=firm_rows,
     )
+    fiches_modeles = {
+        prod.product_key: {
+            "prod": prod,
+            "bundle": product_bundles[prod.product_key],
+            "recommandations": build_model_recommendations(prod, product_bundles[prod.product_key], mm_rows),
+        }
+        for prod in produits
+    }
+    vue_firme = {
+        "legend": FIRM_LEGEND.get(firm, firm),
+        "firm_results": firm_rows,
+        "ref_sid": sid_ref,
+        "ref_scen": ref_scen,
+        "ref_res": ref_res,
+        "r_p1": r_p1,
+        "r_p4": r_p4,
+        "r_p8": r_p8,
+        "projection_1500_2250_3000": _projection_1500_2250_3000(ref_scen),
+        "cross_matrix_pct": _safe_cross_matrix(firm, ref_scen),
+    }
+    return {
+        "xlsx": xlsx,
+        "wb": wb,
+        "firm": firm,
+        "legend": FIRM_LEGEND.get(firm, firm),
+        "produits": produits,
+        "focal_prod": focal_prod,
+        "mm_rows": mm_rows,
+        "grid": grid,
+        "results": results,
+        "product_bundles": product_bundles,
+        "vue_firme": vue_firme,
+        "fiches_modeles": fiches_modeles,
+        "recommandations_firme": recommandations_firme,
+        "cross_matrix_pct": vue_firme["cross_matrix_pct"],
+    }
 
-    story: list = []
 
-    hero_style = ParagraphStyle(
-        "RAPPORT_HERO",
-        parent=P_INS,
-        fontName="Helvetica-Bold",
-        fontSize=13,
-        leading=16,
-        textColor=NAVY,
-        alignment=TA_CENTER,
-        spaceAfter=8,
+def append_reading_note(story: list, text: str) -> None:
+    story.append(Spacer(1, 3))
+    story.append(Paragraph(f"Note de lecture : {pdf_escape(text)}", P_SMALL))
+
+
+def _append_cover_exec_toc(story: list, code_firme: str, vue_firme: dict[str, Any], fiches_modeles: dict[str, Any]) -> None:
+    legend = vue_firme["legend"]
+    best = max(vue_firme["firm_results"], key=lambda row: row[3].profit)
+    summary = (
+        f"<b>Résumé exécutif.</b> {pdf_escape(legend)} — {len(vue_firme['firm_results'])} scénarios firmes simulés. "
+        f"Meilleur profit: <b>{pdf_escape(scenario_display_title(best[0]))}</b> ({fmt_money(best[3].profit)} $). "
+        f"Le rapport regroupe une vue firme (sections 1.1 à 1.7, 1.10) puis {len(fiches_modeles)} fiches modèle."
     )
-    sub_style = ParagraphStyle(
-        "RAPPORT_SUB",
-        parent=P_INS,
-        fontSize=10,
-        leading=14,
-        alignment=TA_CENTER,
-        spaceAfter=14,
-        textColor=NAVY,
-    )
+    story.append(cover_banner("RAPPORT VAE - ANALYSE STRATEGIQUE", f"Firme {code_firme} - {legend}"))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph(summary, P_JUST))
+    story.append(PageBreak())
+    story.append(Paragraph("<b>Table des matieres</b>", P_INS))
+    toc_items = [
+        "PARTIE VUE FIRME",
+        "1.1 Tableau de bord scenarios (firme)",
+        "1.2 Parts de marche firmes",
+        "1.3 Segments de marche",
+        "1.4 Croissance du marche",
+        "Tableau croise firme x segment",
+        "1.5 Portefeuille et performance",
+        "1.6 Leviers strategiques",
+        "1.7 Reference + projections 1500/2250/3000",
+        "1.10 Recommandations",
+        "PARTIE VUE MODELE",
+    ]
+    for k in fiches_modeles.keys():
+        toc_items.append(f"Modele {k}: contexte, portefeuille, budgets, leviers, performance, alertes, recommandations")
+    story.extend(toc_block(toc_items))
+    story.append(PageBreak())
 
-    story.append(Spacer(1, 6))
-    story.append(Paragraph("RAPPORT D'ANALYSE STRATÉGIQUE", hero_style))
-    story.append(
-        Paragraph(
-            pdf_escape(f"Simulation de marché VAE — Résultats, lecture concurrentielle et recommandations — {legend}"),
-            sub_style,
-        )
-    )
-    story.append(Paragraph(exec_txt, P_JUST))
-    story.append(Spacer(1, 12))
 
-    append_toc_multi_scope(story, firm, legend, prods)
-
-    w = CONTENT_WIDTH
-    ref_sid, _ref_own, ref_scen, ref_res = next(x for x in results if x[0] == f"{firm}_FocalPremium_P2")
-
-    # ─── 1. Tableau de bord ─────────────────────────────────────────────────
-    H1(story, f"1. Tableau de bord — vue d'ensemble ({n_scen} scénarios)")
+def _append_section_11_dashboard(story: list, firm_results: list[tuple[str, str, ScenarioInput, SimulationResult]], firm: str) -> None:
+    H1(story, "1.1 Tableau de bord scenarios - vue firme")
     kpi_items = [
-        ("Meilleur profit (toutes firmes)", f"{fmt_money(best_res.profit)} $", NAVY),
-        ("Meilleur scénario (firme suivie)", f"{fmt_money(best_primary[3].profit)} $ — {best_primary[0][:28]}", NAVY),
-        ("Pire cas (tri global)", f"{fmt_money(worst_res.profit)} $ — {worst_sid[:24]}", NAVY),
-        ("Marge max. (tous scénarios)", fmt_pct(max_margin), NAVY),
+        ("Scenarios", str(len(firm_results)), NAVY),
+        ("Meilleur profit", f"{fmt_money(max(r[3].profit for r in firm_results))} $", NAVY),
+        ("Marge max", fmt_pct(max(r[3].margin for r in firm_results)), NAVY),
+        ("Service max", fmt_pct(max(r[3].service_rate for r in firm_results), 0), NAVY),
     ]
     story.append(kpi_block(kpi_items))
-    story.append(Spacer(1, 10))
-
-    cmp_rows = []
-    fills = []
-    for sid, owner, scen, res in results:
-        cmp_rows.append(
+    rows: list[list[str]] = []
+    fills: list[Color | None] = []
+    for sid, owner, scen, res in sorted(firm_results, key=lambda row: row[3].profit, reverse=True):
+        rows.append(
             [
-                sid.replace("_", " ")[:34],
+                scenario_display_title(sid),
                 owner,
                 str(scen.period),
                 str(res.sales),
@@ -1190,170 +596,446 @@ def main():
                 fmt_pct(res.margin),
                 fmt_pct(res.market_share),
                 fmt_pct(res.service_rate, 0),
+                competitor_reaction_blurb(sid, firm),
             ]
         )
-        fills.append(GREEN_LT if owner == firm else None)
-
-    cw = [w * 0.26, w * 0.06, w * 0.05, w * 0.07, w * 0.11, w * 0.11, w * 0.08, w * 0.09, w * 0.09]
-    story.append(
-        Paragraph("<b>1.1 Comparatif — scénarios classés par profit</b>", P_INS)
-    )
-    story.append(Spacer(1, 4))
+        fills.append(GREEN_LT)
+    w = CONTENT_WIDTH
     story.append(
         table_standard(
-            ["Scénario", "Fir.", "P.", "Ventes", "CA ($)", "Profit ($)", "Marge", "PDM", "Serv."],
-            cmp_rows,
-            cw,
+            ["Scenario", "Firme", "P", "Ventes", "CA", "Profit", "Marge", "PDM", "Service", "Reaction concurrents"],
+            rows,
+            [w * 0.19, w * 0.06, w * 0.05, w * 0.07, w * 0.09, w * 0.09, w * 0.08, w * 0.08, w * 0.08, w * 0.21],
             row_fills=fills,
         )
     )
+    append_reading_note(story, "Colonne 'Reaction concurrents' ajoutee pour lecture rapide des contre-mouvements.")
+
+
+def _append_sections_12_14_context(story: list, wb: openpyxl.Workbook, firm: str) -> None:
+    H1(story, "1.2 Parts de marche firmes")
+    rows_f = [[code, f"{units:,.0f}".replace(",", " "), fmt_pct(share)] for code, units, share in load_firms_market_rows(wb)]
+    story.append(table_standard(["Firme", "Unites ref.", "PDM"], rows_f, [CONTENT_WIDTH * 0.28, CONTENT_WIDTH * 0.35, CONTENT_WIDTH * 0.37]))
+    append_reading_note(story, "PDM lue depuis la feuille FIRMS (annee de reference).")
+    story.append(Spacer(1, 10))
+    H1(story, "1.3 Structure des segments")
+    rows_s: list[list[str]] = []
+    ws = wb["SEGMENTS"]
+    for r in range(2, ws.max_row + 1):
+        if ws.cell(r, 1).value is None:
+            continue
+        rows_s.append(
+            [
+                str(ws.cell(r, 1).value),
+                str(ws.cell(r, 2).value or ""),
+                fmt_pct(float(ws.cell(r, 3).value or 0.0)),
+                f"{float(ws.cell(r, 5).value or 0):,.0f}".replace(",", " "),
+                fmt_pct(float(ws.cell(r, 6).value or 0.0)),
+            ]
+        )
     story.append(
-        Paragraph(
-            pdf_escape(
-                "Lignes triées par profit décroissant. Surbrillance verte = scénarios de la firme suivie. "
-                "P. = période moteur. PDM = part de marché globale (ventes / marché total)."
-            ),
-            P_SMALL,
+        table_standard(
+            ["Segment", "Description", "Part", "Unites ref.", "Online"],
+            rows_s,
+            [CONTENT_WIDTH * 0.10, CONTENT_WIDTH * 0.43, CONTENT_WIDTH * 0.13, CONTENT_WIDTH * 0.18, CONTENT_WIDTH * 0.16],
         )
     )
-    story.append(PageBreak())
-
-    part_hdr = ParagraphStyle(
-        "RAPPORT_PART",
-        parent=P_INS,
-        fontName="Helvetica-Bold",
-        fontSize=11,
-        leading=14,
-        textColor=NAVY,
-        alignment=TA_CENTER,
-        spaceAfter=6,
+    append_reading_note(story, "Le prix prefere n'est volontairement pas reproduit dans cette version.")
+    story.append(Spacer(1, 10))
+    H1(story, "1.4 Croissance du marche")
+    gr, seg_col = growth_rows(firm)
+    story.append(
+        table_standard(
+            ["Periode", "Annee", "Marche total", seg_col, "Croiss. vs P1"],
+            gr,
+            [CONTENT_WIDTH * 0.13, CONTENT_WIDTH * 0.14, CONTENT_WIDTH * 0.25, CONTENT_WIDTH * 0.25, CONTENT_WIDTH * 0.23],
+        )
     )
-    story.append(Paragraph("<b>PARTIE — VUE FIRME</b>", part_hdr))
-    story.append(Spacer(1, 4))
+    append_reading_note(story, "Projection 8 periodes, croissance globale +12 %/an.")
 
-    append_section_2_contexte_firm(story, wb, firm, w)
-    append_section_3_portefeuille_firm(story, wb, firm, w, prods, focal_prod)
-    append_section_4_leviers_firm(story, results, firm, w, mm_rows)
-    append_section_5_reference(
-        story,
-        w,
-        firm=firm,
-        legend=legend,
-        prod=focal_prod,
-        ref_scen=ref_scen,
-        ref_res=ref_res,
-        ref_label=ref_sid,
+
+def _append_cross_matrix(story: list, cross: dict[str, Any]) -> None:
+    H1(story, "Tableau croise firme x segment")
+    firms = cross["firms"]
+    segs = cross["segments"]
+    grid = cross["pct_grid"]
+    headers = ["Firme"] + [f"S{i}" for i in range(1, len(segs) + 1)] + ["TOTAL"]
+    rows: list[list[str]] = []
+    for i, firm in enumerate(firms):
+        rows.append([firm] + [fmt_pct(grid[i][j] / 100.0, 2) for j in range(len(segs))] + [fmt_pct(cross["row_totals_pct"][i] / 100.0, 2)])
+    rows.append(["TOTAL"] + [fmt_pct(cross["col_totals_pct"][j] / 100.0, 2) for j in range(len(segs))] + [fmt_pct(cross["grand_total_pct"] / 100.0, 2)])
+    story.append(table_standard(headers, rows, [CONTENT_WIDTH / len(headers)] * len(headers)))
+    if cross.get("footnote"):
+        append_reading_note(story, str(cross["footnote"]))
+
+
+def _append_section_15_portfolio(story: list, wb: openpyxl.Workbook, produits: list[ProdRow], product_bundles: dict[str, Any]) -> None:
+    H1(story, "1.5 Portefeuille produits et grille performance")
+    rows_p: list[list[str]] = []
+    for p in produits:
+        note = portfolio_anomaly_note(p.product_key) or production_band_note(p.units)
+        rows_p.append(
+            [
+                p.product_key,
+                p.model_name[:34],
+                f"{p.segment_idx} - {segment_label_from_idx(wb, p.segment_idx)[:20]}",
+                canonical_gamme_label(p.range_raw),
+                fmt_money(p.base_price),
+                fmt_money(p.units),
+                note or "",
+            ]
+        )
+    story.append(
+        table_standard(
+            ["Code", "Modele", "Segment", "Gamme", "Prix ref.", "Unites ref.", "Alerte / note"],
+            rows_p,
+            [CONTENT_WIDTH * 0.09, CONTENT_WIDTH * 0.25, CONTENT_WIDTH * 0.21, CONTENT_WIDTH * 0.10, CONTENT_WIDTH * 0.10, CONTENT_WIDTH * 0.10, CONTENT_WIDTH * 0.15],
+        )
     )
-    append_section_6_costs(story, w, focal_prod)
-    try:
-        r_p1_f = next(x[3] for x in results if x[0] == f"{firm}_FocalPremium_P1")
-        r_p4_f = next(x[3] for x in results if x[0] == f"{firm}_Figee_P4")
-        r_p8_f = next(x[3] for x in results if x[0] == f"{firm}_Figee_P8")
-        append_section_7_projection(
-            story,
-            w,
-            r_p1_f,
-            r_p4_f,
-            r_p8_f,
-            "Les scénarios « Figée » répliquent les mêmes prix, production et budgets marketing et recherche et développement que la référence P1 du produit vedette, aux périodes 4 et 8 : le marché et les coûts évoluent malgré tout.",
+    append_reading_note(story, "Les anomalies mettent en evidence cannibalisation, prix et volume hors bandes cibles.")
+    story.append(Spacer(1, 10))
+    rows_perf: list[list[str]] = []
+    for p in produits:
+        b = product_bundles[p.product_key]
+        rs = b["ref_res"]
+        rows_perf.append(
+            [
+                p.product_key,
+                fmt_pct(rs.market_share),
+                fmt_pct(rs.market_share_segment),
+                fmt_pct(rs.margin),
+                fmt_pct(rs.service_rate, 0),
+                fmt_money(rs.forecast_ending_stock_units),
+                fmt_money(rs.profit),
+            ]
         )
-    except StopIteration:
-        story.append(PageBreak())
-        H1(story, "7. Projection temporelle — Risque d'une stratégie statique")
-        story.append(Paragraph("Projection indisponible (scénarios figés absents).", P_SMALL))
-        story.append(PageBreak())
-
-    append_section_8_recommandations_firm(story, legend, ref_res, focal_prod, mm_rows, results)
-
-    for prod in prods:
-        story.append(PageBreak())
-        story.append(
-            Paragraph(
-                pdf_escape(f"PARTIE — VUE MODÈLE — {prod.product_key}"),
-                part_hdr,
-            )
+    story.append(
+        table_standard(
+            ["Modele", "PDM glob.", "PDM seg.", "Marge", "Service", "Stock fin", "Profit"],
+            rows_perf,
+            [CONTENT_WIDTH * 0.15, CONTENT_WIDTH * 0.13, CONTENT_WIDTH * 0.13, CONTENT_WIDTH * 0.12, CONTENT_WIDTH * 0.12, CONTENT_WIDTH * 0.16, CONTENT_WIDTH * 0.19],
         )
-        story.append(Spacer(1, 4))
-        b = product_bundles[prod.product_key]
-        append_section_2_contexte_model(story, wb, firm, w, prod, legend)
-        append_section_3_portefeuille_model(story, wb, firm, w, prod)
-        append_section_4_leviers_model(story, firm, w, prod, b, mm_rows)
-        append_section_5_reference(
-            story,
-            w,
-            firm=firm,
-            legend=legend,
-            prod=prod,
-            ref_scen=b["ref_scen"],
-            ref_res=b["ref_res"],
-            ref_label=b["ref_scen"].scenario_name,
-        )
-        append_section_6_costs(story, w, prod)
-        append_section_7_projection(
-            story,
-            w,
-            b["r_p1"],
-            b["r_p4"],
-            b["r_p8"],
-            "Décisions figées comme en P1 pour ce modèle ; passage aux périodes 4 et 8 pour mesurer la dérive du marché.",
-        )
-        append_section_8_recommandations_model(story, prod, b, mm_rows)
+    )
+    append_reading_note(story, "Grille performance calculee sur les scenarios P2ref de chaque modele.")
 
-    story.append(PageBreak())
 
-    # ─── 9. Synthèse ──────────────────────────────────────────────────────────
-    H1(story, "9. Synthèse décisionnelle et conclusion")
-    syn_rows = [
-        ["Priorité capacité / service", "Réduit ventes perdues", "P3", "Haute"],
-        ["Pilotage marketing par canal", "Alignement coefficients segment", "P3–P4", "Moyenne"],
-        ["Maîtrise des promotions", "Eviter erosion marge sans volume", "P3", "Haute"],
-        ["Révision décisionnelle chaque période", "Évite dérive « stratégie figée »", "P3–P8", "Critique"],
+def _append_section_16_levers(story: list, mm_rows: list[list[str]], firm_rows: list[tuple[str, str, ScenarioInput, SimulationResult]]) -> None:
+    H1(story, "1.6 Leviers strategiques")
+    rows_l: list[list[str]] = []
+    for sid, _owner, _sc, res in sorted(firm_rows, key=lambda row: row[3].profit, reverse=True):
+        rows_l.append(
+            [
+                scenario_display_title(sid),
+                fmt_money(res.revenue),
+                fmt_money(res.profit),
+                fmt_pct(res.margin),
+                fmt_pct(res.service_rate, 0),
+                fmt_money(max(0, res.demand - res.sales)),
+            ]
+        )
+    story.append(
+        table_standard(
+            ["Levier / scenario", "CA", "Profit", "Marge", "Service", "Demande non servie"],
+            rows_l,
+            [CONTENT_WIDTH * 0.36, CONTENT_WIDTH * 0.14, CONTENT_WIDTH * 0.14, CONTENT_WIDTH * 0.12, CONTENT_WIDTH * 0.10, CONTENT_WIDTH * 0.14],
+        )
+    )
+    append_reading_note(story, "Aucun sweep promo AVE n'est inclus dans la section leviers de cette version.")
+    story.append(Spacer(1, 8))
+    rows_m = [row + [top3_channels_cell(row)] for row in mm_rows]
+    story.append(
+        table_standard(
+            ["Segment", "Digital", "Social", "Influenceur", "Affichage", "Evenements", "Top 3 canaux"],
+            rows_m,
+            [CONTENT_WIDTH * 0.09, CONTENT_WIDTH * 0.10, CONTENT_WIDTH * 0.10, CONTENT_WIDTH * 0.11, CONTENT_WIDTH * 0.11, CONTENT_WIDTH * 0.11, CONTENT_WIDTH * 0.38],
+        )
+    )
+    append_reading_note(story, "Top 3 canaux derive de MARKETING_MATRIX.")
+
+
+def _append_section_17_reference(story: list, vue_firme: dict[str, Any]) -> None:
+    H1(story, "1.7 Scenario de reference et projection 1500 / 2250 / 3000")
+    ref_scen: ScenarioInput = vue_firme["ref_scen"]
+    ref_res: SimulationResult = vue_firme["ref_res"]
+    params_rows = [
+        ["Scenario", scenario_display_title(vue_firme["ref_sid"])],
+        ["Periode", f"{ref_scen.period} ({period_to_year(ref_scen.period)})"],
+        ["Prix catalogue", f"{fmt_money(ref_scen.price)} $"],
+        ["Promotion", fmt_pct(ref_scen.promotion_rate)],
+        ["Production", str(ref_scen.production)],
+        ["Budget marketing (firme)", fmt_pct_and_money(ref_scen.firm_marketing_budget_total / max(firm_adjusted_budget_from_scenario(ref_scen), 1), ref_scen.firm_marketing_budget_total)],
+        ["Budget R&D (firme)", fmt_pct_and_money(ref_scen.firm_rd_budget_total / max(firm_adjusted_budget_from_scenario(ref_scen), 1), ref_scen.firm_rd_budget_total)],
+    ]
+    story.append(table_standard(["Parametre", "Valeur"], params_rows, [CONTENT_WIDTH * 0.40, CONTENT_WIDTH * 0.60]))
+    append_reading_note(story, "Budgets affiches au niveau firme, puis alloues aux produits par poids strategique.")
+    story.append(Spacer(1, 8))
+    proj_rows = []
+    for units, res in vue_firme["projection_1500_2250_3000"]:
+        proj_rows.append(
+            [
+                str(units),
+                str(res.sales),
+                fmt_pct(res.service_rate, 0),
+                fmt_money(res.forecast_ending_stock_units),
+                fmt_money(res.profit),
+                "OK" if res.service_rate >= 0.85 else "Sous seuil 85 %",
+            ]
+        )
+    story.append(
+        table_standard(
+            ["Production", "Ventes", "Service", "Stock fin", "Profit", "Lecture"],
+            proj_rows,
+            [CONTENT_WIDTH * 0.14, CONTENT_WIDTH * 0.14, CONTENT_WIDTH * 0.12, CONTENT_WIDTH * 0.18, CONTENT_WIDTH * 0.20, CONTENT_WIDTH * 0.22],
+        )
+    )
+    append_reading_note(story, "La grille 1500/2250/3000 aide a calibrer la capacite cible.")
+    story.append(Spacer(1, 8))
+    fig_rows = [
+        ["P1", fmt_money(vue_firme["r_p1"].profit), fmt_pct(vue_firme["r_p1"].margin), fmt_pct(vue_firme["r_p1"].service_rate, 0)],
+        ["P4", fmt_money(vue_firme["r_p4"].profit), fmt_pct(vue_firme["r_p4"].margin), fmt_pct(vue_firme["r_p4"].service_rate, 0)],
+        ["P8", fmt_money(vue_firme["r_p8"].profit), fmt_pct(vue_firme["r_p8"].margin), fmt_pct(vue_firme["r_p8"].service_rate, 0)],
     ]
     story.append(
         table_standard(
-            ["Action", "Impact attendu", "Horizon", "Priorité"],
-            syn_rows,
-            [w * 0.34, w * 0.30, w * 0.14, w * 0.22],
+            ["Strategie figee", "Profit", "Marge", "Service"],
+            fig_rows,
+            [CONTENT_WIDTH * 0.22, CONTENT_WIDTH * 0.28, CONTENT_WIDTH * 0.25, CONTENT_WIDTH * 0.25],
         )
     )
-    story.append(Spacer(1, 12))
+    append_reading_note(story, "Indicateur de derive temporelle sur strategie non ajustee.")
 
-    conclusion = (
-        f"<b>Conclusion.</b> {pdf_escape(legend)} dispose d’un portefeuille structuré et d’un scénario vedette "
-        f"({pdf_escape(ref_sid)}) dans la grille agrégée ; chaque modèle du catalogue dispose en outre d’un bloc "
-        f"sections 2–8 pour comparer leviers et projection à l’échelle de la référence produit. "
-        f"La dynamique de marché (+12 % / an) impose de réaligner prix, capacité et mix marketing à chaque période. "
-        f"Les données structurelles (parts, segments, matrice marketing) proviennent du classeur "
-        f"<b>{pdf_escape(xlsx.name)}</b> ; les résultats chiffrés du <b>moteur Python simulate()</b>. "
-        f"Document généré le <b>{date.today().isoformat()}</b>."
+
+def _append_section_110_reco(story: list, recommandations: list[Any]) -> None:
+    H1(story, "1.10 Recommandations")
+    rows = [[r.action, r.impact, r.horizon, r.priority] for r in recommandations]
+    story.append(
+        table_standard(
+            ["Action", "Impact attendu", "Horizon", "Priorite"],
+            rows,
+            [CONTENT_WIDTH * 0.35, CONTENT_WIDTH * 0.33, CONTENT_WIDTH * 0.14, CONTENT_WIDTH * 0.18],
+        )
     )
-    story.append(Paragraph(conclusion, P_JUST))
-    story.append(Spacer(1, 10))
+    append_reading_note(story, "Priorisation issue des regles stratégiques firme.")
+
+
+def _append_model_part(
+    story: list,
+    wb: openpyxl.Workbook,
+    code_firme: str,
+    mm_rows: list[list[str]],
+    fiche: dict[str, Any],
+) -> None:
+    prod: ProdRow = fiche["prod"]
+    bundle = fiche["bundle"]
+    ref_scen: ScenarioInput = bundle["ref_scen"]
+    ref_res: SimulationResult = bundle["ref_res"]
+    story.append(PageBreak())
+    part_style = ParagraphStyle(
+        "PART_MODEL",
+        parent=P_INS,
+        fontSize=11,
+        leading=13,
+        fontName="Helvetica-Bold",
+        alignment=TA_CENTER,
+        textColor=NAVY,
+    )
+    story.append(Paragraph(f"PARTIE VUE MODELE - {pdf_escape(prod.product_key)}", part_style))
+    story.append(Spacer(1, 6))
+    H1(story, "2. Contexte concurrentiel")
     story.append(
         Paragraph(
-            pdf_escape(
-                "Sources : feuilles FIRMS, SEGMENTS, MARKETING_MATRIX, BASE_REFERENCE_MODEL du classeur VAE ; "
-                "moteur open-source du dépôt BotMarketing (engine.simulation)."
-            ),
-            P_SMALL,
+            f"Modele <b>{pdf_xml_fragment(prod.product_key)}</b> - segment {prod.segment_idx} ({pdf_xml_fragment(segment_label_from_idx(wb, prod.segment_idx))}).",
+            P_JUST,
+        )
+    )
+    gr, seg_col = growth_rows(code_firme)
+    story.append(
+        table_standard(
+            ["Periode", "Annee", "Marche total", seg_col, "Croiss. vs P1"],
+            gr,
+            [CONTENT_WIDTH * 0.13, CONTENT_WIDTH * 0.14, CONTENT_WIDTH * 0.25, CONTENT_WIDTH * 0.25, CONTENT_WIDTH * 0.23],
+        )
+    )
+    append_reading_note(story, "Contexte resume pour eviter de dupliquer toute la vue firme.")
+    H1(story, "3. Portefeuille (focus modele)")
+    story.append(
+        table_standard(
+            ["Code", "Modele", "Segment", "Gamme", "Prix ref.", "Unites ref."],
+            [[
+                prod.product_key,
+                prod.model_name,
+                f"{prod.segment_idx} - {segment_label_from_idx(wb, prod.segment_idx)}",
+                canonical_gamme_label(prod.range_raw),
+                fmt_money(prod.base_price),
+                fmt_money(prod.units),
+            ]],
+            [CONTENT_WIDTH * 0.12, CONTENT_WIDTH * 0.33, CONTENT_WIDTH * 0.20, CONTENT_WIDTH * 0.12, CONTENT_WIDTH * 0.11, CONTENT_WIDTH * 0.12],
+        )
+    )
+    H1(story, "3.1 Budgets du modele")
+    adj_firm = firm_adjusted_budget_from_scenario(ref_scen)
+    rows_budget = [
+        ["Budget ajuste firme", f"{fmt_money(adj_firm)} $"],
+        ["Budget marketing firme", fmt_pct_and_money(ref_scen.firm_marketing_budget_total / max(adj_firm, 1), ref_scen.firm_marketing_budget_total)],
+        ["Budget R&D firme", fmt_pct_and_money(ref_scen.firm_rd_budget_total / max(adj_firm, 1), ref_scen.firm_rd_budget_total)],
+        ["Poids strategique modele", f"{ref_scen.allocation_weight * 100:.1f} %".replace(".", ",")],
+        ["Budget marketing modele", f"{fmt_money(ref_scen.marketing_budget)} $"],
+        ["Budget R&D modele", f"{fmt_money(ref_scen.rd_budget)} $"],
+    ]
+    story.append(table_standard(["Indicateur", "Valeur"], rows_budget, [CONTENT_WIDTH * 0.45, CONTENT_WIDTH * 0.55]))
+    append_reading_note(story, "Les lignes 'Part marketing/R&D imputee au modele' ont ete retirees.")
+    H1(story, "4. Leviers")
+    rows_lev = []
+    for lab, res in bundle["levers"]:
+        rows_lev.append([lab, fmt_money(res.revenue), fmt_money(res.profit), fmt_pct(res.margin), fmt_pct(res.service_rate, 0)])
+    story.append(
+        table_standard(
+            ["Levier", "CA", "Profit", "Marge", "Service"],
+            rows_lev,
+            [CONTENT_WIDTH * 0.36, CONTENT_WIDTH * 0.18, CONTENT_WIDTH * 0.18, CONTENT_WIDTH * 0.14, CONTENT_WIDTH * 0.14],
+        )
+    )
+    seg_mm = next((row for row in mm_rows if row[0] == str(prod.segment_idx)), None)
+    if seg_mm:
+        story.append(
+            table_standard(
+                ["Segment", "Digital", "Social", "Influenceur", "Affichage", "Evenements", "Top 3 canaux"],
+                [seg_mm + [top3_channels_cell(seg_mm)]],
+                [CONTENT_WIDTH * 0.09, CONTENT_WIDTH * 0.10, CONTENT_WIDTH * 0.10, CONTENT_WIDTH * 0.11, CONTENT_WIDTH * 0.11, CONTENT_WIDTH * 0.11, CONTENT_WIDTH * 0.38],
+            )
+        )
+    append_reading_note(story, "Leviers limites au modele courant.")
+    H1(story, "Fiche performance modele")
+    rows_perf = [
+        ["Ventes", str(ref_res.sales)],
+        ["CA", f"{fmt_money(ref_res.revenue)} $"],
+        ["Profit", f"{fmt_money(ref_res.profit)} $"],
+        ["Marge", fmt_pct(ref_res.margin)],
+        ["PDM globale", fmt_pct(ref_res.market_share)],
+        ["PDM segment", fmt_pct(ref_res.market_share_segment)],
+        ["Service", fmt_pct(ref_res.service_rate, 0)],
+        ["Stock final", str(ref_res.forecast_ending_stock_units)],
+    ]
+    story.append(table_standard(["KPI", "Valeur"], rows_perf, [CONTENT_WIDTH * 0.40, CONTENT_WIDTH * 0.60]))
+    H1(story, "Alertes modele")
+    alerts = bundle.get("alerts", [])
+    rows_alerts = [[a.level.upper(), a.code, a.message] for a in alerts] if alerts else [["INFO", "-", "Aucune alerte priorisee."]]
+    story.append(
+        table_standard(
+            ["Niveau", "Code", "Message"],
+            rows_alerts,
+            [CONTENT_WIDTH * 0.12, CONTENT_WIDTH * 0.20, CONTENT_WIDTH * 0.68],
+        )
+    )
+    append_reading_note(story, "Alertes issues de engine.rapport_alertes.")
+    H1(story, "Recommandations modele")
+    rec_rows = [[r.action, r.impact, r.horizon, r.priority] for r in fiche["recommandations"]]
+    story.append(
+        table_standard(
+            ["Action", "Impact", "Horizon", "Priorite"],
+            rec_rows,
+            [CONTENT_WIDTH * 0.35, CONTENT_WIDTH * 0.33, CONTENT_WIDTH * 0.14, CONTENT_WIDTH * 0.18],
         )
     )
 
-    wb.close()
 
-    out = args.out or Path(str(OUT_PDF).format(firm=firm))
+def generer_pdf_rapport(
+    out: Path,
+    code_firme: str,
+    vue_firme: dict[str, Any],
+    fiches_modeles: dict[str, Any],
+    recommandations: list[Any],
+    donnees: dict[str, Any],
+) -> None:
+    story: list = []
+    _append_cover_exec_toc(story, code_firme, vue_firme, fiches_modeles)
+    part_style = ParagraphStyle(
+        "PART_FIRM",
+        parent=P_INS,
+        fontSize=12,
+        leading=14,
+        fontName="Helvetica-Bold",
+        alignment=TA_CENTER,
+        textColor=NAVY,
+    )
+    story.append(Paragraph("PARTIE VUE FIRME", part_style))
+    story.append(Spacer(1, 6))
+    _append_section_11_dashboard(story, vue_firme["firm_results"], code_firme)
+    _append_sections_12_14_context(story, donnees["wb"], code_firme)
+    _append_cross_matrix(story, vue_firme["cross_matrix_pct"])
+    _append_section_15_portfolio(story, donnees["wb"], donnees["produits"], donnees["product_bundles"])
+    _append_section_16_levers(story, donnees["mm_rows"], vue_firme["firm_results"])
+    _append_section_17_reference(story, vue_firme)
+    _append_section_110_reco(story, recommandations)
+    for _, fiche in fiches_modeles.items():
+        _append_model_part(story, donnees["wb"], code_firme, donnees["mm_rows"], fiche)
+    out = out.expanduser()
     if not out.is_absolute():
         out = Path.cwd() / out
     out.parent.mkdir(parents=True, exist_ok=True)
-    build_doc(out, story, firm_code=firm, left_text=footer)
+    footer = f"Rapport VAE - {vue_firme['legend']} - usage interne"
+    build_doc(
+        out,
+        story,
+        firm_code=code_firme,
+        left_text=footer,
+        report_date=date.today().isoformat(),
+    )
 
-    dl = DOWNLOADS / out.name
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Generateur rapport PDF VAE moderne")
+    ap.add_argument("--all-firms", action="store_true", help="Generer un rapport pour chaque firme.")
+    ap.add_argument("--firme", "--firm", default="TRE")
+    ap.add_argument("--workbook", type=Path, default=None)
+    ap.add_argument("--out", type=Path, default=None)
+    args = ap.parse_args()
+
+    xlsx = args.workbook.expanduser() if args.workbook else DEFAULT_XLSX
+    if not xlsx.exists():
+        raise SystemExit(f"Classeur introuvable : {xlsx}")
+
+    if args.all_firms:
+        for firm in sorted(MARKET_CONFIG["firms"].keys()):
+            donnees = build_report_payload(xlsx, firm)
+            out = Path(str(OUT_PDF).format(firm=firm, date=date.today().isoformat()))
+            generer_pdf_rapport(
+                out,
+                firm,
+                donnees["vue_firme"],
+                donnees["fiches_modeles"],
+                donnees["recommandations_firme"],
+                donnees,
+            )
+            try:
+                shutil.copy2(out, DOWNLOADS / out.name)
+            except OSError:
+                pass
+            finally:
+                donnees["wb"].close()
+            print(f"[OK] PDF : {out}")
+        return
+
+    firm = resolve_firm_code(args.firme)
+    if firm not in MARKET_CONFIG["firms"]:
+        raise SystemExit(f"Firme inconnue : {firm!r}")
+    donnees = build_report_payload(xlsx, firm)
+    out = args.out or Path(str(OUT_PDF).format(firm=firm, date=date.today().isoformat()))
+    generer_pdf_rapport(
+        out,
+        firm,
+        donnees["vue_firme"],
+        donnees["fiches_modeles"],
+        donnees["recommandations_firme"],
+        donnees,
+    )
     try:
-        shutil.copy2(out, dl)
-        print(f"PDF : {out}")
-        print(f"Copie : {dl}")
+        shutil.copy2(out, DOWNLOADS / out.name)
     except OSError:
-        print(f"PDF : {out}")
+        pass
+    finally:
+        donnees["wb"].close()
+    print(f"[OK] PDF : {out}")
 
 
 if __name__ == "__main__":

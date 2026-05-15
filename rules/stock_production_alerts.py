@@ -44,12 +44,19 @@ def build_stock_production_diagnostics(
     rate = float(cref.get("inventory_carrying_rate", 0.025))
     surplus_threshold = int(cref.get("stock_surplus_units_threshold", 200))
     surplus_penalty_rate = float(cref.get("stock_surplus_penalty_rate", 0.0))
+    surplus_penalty_rate_high = float(cref.get("stock_surplus_penalty_rate_high", surplus_penalty_rate))
 
     stock_available = max(0, opening_stock + production)
     ending_stock = max(0, stock_available - sales)
     base_storage_cost = ending_stock * max(unit_cost, 0.0) * rate
-    excess_units = max(0, ending_stock - max(surplus_threshold, 0))
-    surplus_penalty_cost = excess_units * max(unit_cost, 0.0) * max(surplus_penalty_rate, 0.0)
+    # Pénalité surstock (chiffrier) : 5 % sur la 1re unité d’excédent (> 200 u.), 8 % sur chaque unité suivante.
+    excess_total = max(0, ending_stock - surplus_threshold)
+    tier1_units = min(excess_total, 1)
+    tier2_units = max(0, excess_total - 1)
+    uc = max(unit_cost, 0.0)
+    surplus_penalty_cost = tier1_units * uc * max(surplus_penalty_rate, 0.0) + tier2_units * uc * max(
+        surplus_penalty_rate_high, 0.0
+    )
     storage_cost = base_storage_cost + surplus_penalty_cost
 
     if demand <= 0:
@@ -154,8 +161,9 @@ def build_stock_production_diagnostics(
 
     if surplus_penalty_cost > 0:
         details.append(
-            f"Pénalité surstock (au-delà de {surplus_threshold} unités) : "
-            f"{surplus_penalty_cost:,.0f} $."
+            f"Pénalité surstock (excédent > {surplus_threshold} u.) : "
+            f"{surplus_penalty_cost:,.0f} $ "
+            f"({surplus_penalty_rate * 100:.0f} % sur la 1re unité, {surplus_penalty_rate_high * 100:.0f} % sur les suivantes)."
         )
         shorts.append(
             f"Pénalité surstock appliquée (>{surplus_threshold} u.)."

@@ -10,8 +10,8 @@ Demand model (attraction / logit):
 
 Market growth (single phase, Excel parameters):
   Reference year 2026: 110,000 units
-  Period 1 = 2027: 110,000 * 1.12 = 123,200 units
-  Growth: +12%/yr for all 8 decision periods (2027-2034)
+  Period 1 = base_year (2026): market size from total_market_size(1)
+  Growth: +12%/yr for all 8 decision periods (2026-2033)
   Formula: base_market_size * (1 + growth_rate) ** period
 
 COGS model (Excel parameters):
@@ -30,6 +30,12 @@ from engine.financials import (
 )
 from engine.models import ScenarioInput, SimulationResult
 from engine.rules import validate_scenario
+from engine.stability_checks import (
+    compute_simulation_stability_score,
+    marketing_roi,
+    rd_roi,
+    run_financial_controls,
+)
 from reporting.baseline_2026 import build_2026_baseline_summary
 from rules.marketing_rules import marketing_efficiency, profit_rate_status
 from rules.price_rules import check_price_range_consistency, price_range_penalty_multiplier
@@ -42,13 +48,18 @@ from rules.production_rules import production_efficiency, recommend_next_period_
 from rules.withdrawal_rules import check_withdrawal_limits
 
 
+def default_competitor_attractiveness(segment: str) -> float:
+    return float(
+        MARKET_CONFIG["default_competitor_attractiveness"].get(segment, 12.0)
+    )
+
+
 # ─── Market size helpers ──────────────────────────────────────────────────────
 
 def total_market_size(period: int) -> float:
     """Return total market size (units) for the given period.
 
-    period 1 = 2027: 110,000 * 1.12^1 = 123,200
-    period 8 = 2034: 110,000 * 1.12^8 = 272,378
+    period 1 (2026): 110,000 * 1.12^1 ; period 8 (2033): 110,000 * 1.12^8
     """
     base = MARKET_CONFIG["base_market_size"]   # 110,000 (reference year 2026)
     g = MARKET_CONFIG["growth_rate"]            # 0.12
@@ -61,7 +72,7 @@ def segment_size(period: int, segment: str) -> float:
 
 
 def period_to_year(period: int) -> int:
-    """period 1 → 2027, period 8 → 2034."""
+    """period 1 → base_year (2026), period 8 → 2033."""
     return MARKET_CONFIG["base_year"] + (period - 1)
 
 
@@ -628,7 +639,8 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
     marketing_cost = scenario.marketing_budget
     rd_cost = scenario.rd_budget
     ref_b = max(scenario.adjusted_budget, 0.0)
-    operating_cost = operating_cost_from_ref_budget(ref_b) + cfg["fixed_overhead"]
+    overhead_share = cfg["fixed_overhead"] * max(scenario.allocation_weight, 0.0)
+    operating_cost = operating_cost_from_ref_budget(ref_b) + overhead_share
     aftersales_cost = aftersales_cost_from_ref_budget(ref_b)
     sustainability_cost = sustainability_cost_from_tranches(
         scenario.sustainability_tranches, ref_b
@@ -785,7 +797,36 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
         interpretations=[],
     ))
 
-    return SimulationResult(
+    stability_probe = SimulationResult(
+        firm_name=scenario.firm_name,
+        period=scenario.period,
+        scenario_name=scenario.scenario_name,
+        demand=demand,
+        sales=sales,
+        service_rate=service_rate,
+        revenue=revenue,
+        production_cost=production_cost,
+        distribution_cost=distribution_cost,
+        marketing_cost=marketing_cost,
+        rd_cost=rd_cost,
+        operating_cost=operating_cost,
+        aftersales_cost=aftersales_cost,
+        sustainability_cost=sustainability_cost,
+        total_cost=total_cost,
+        profit=profit,
+        margin=margin,
+        market_share=market_share_total,
+        market_share_segment=market_share_segment,
+        innovation_score=innovation_score,
+        sustainability_score=sustainability_score,
+        attractiveness=attractiveness,
+        is_valid=is_valid,
+        alerts=[],
+        interpretations=[],
+        profit_rate=profit_rate,
+    )
+
+    result = SimulationResult(
         firm_name=scenario.firm_name,
         period=scenario.period,
         scenario_name=scenario.scenario_name,
@@ -833,7 +874,15 @@ def simulate(scenario: ScenarioInput) -> SimulationResult:
         forecast_ending_stock_units=stock_diag.ending_stock_units,
         inventory_carrying_cost=inventory_carrying_cost,
         stock_coverage_level=stock_diag.coverage_level,
+        allocation_weight=scenario.allocation_weight,
+        firm_marketing_budget_total=scenario.firm_marketing_budget_total,
+        firm_rd_budget_total=scenario.firm_rd_budget_total,
+        marketing_roi=marketing_roi(stability_probe),
+        rd_roi=rd_roi(stability_probe),
+        simulation_stability_score=compute_simulation_stability_score(scenario, stability_probe),
+        financial_control_messages=run_financial_controls(scenario, stability_probe),
     )
+    return result
 
 
 # ─── Multi-scenario runner ────────────────────────────────────────────────────

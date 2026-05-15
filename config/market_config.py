@@ -5,16 +5,16 @@
 #   Simulation VAE 12032026 Final.pdf
 #   VAE_tout_inclus_12_03_2026_ajuste_periodes final.xlsx
 #   Décisions à prendre par les étudiants à chaque période.docx  (voir data/pedagogie_references.txt)
-# Reference year: 2026 | Decision periods: 1-8 (2027-2034)
+# Reference year: 2026 | Decision periods: 1-8 (2026-2033)
 
 MARKET_CONFIG = {
     # ── Total market ──────────────────────────────────────────────────────────
     "base_market_size": 110_000,   # units in reference year 2026 (Excel PARAM)
     "base_average_price": 3_500,   # CAD, average market price 2026
-    "base_year": 2027,             # Period 1 = 2027 (first decision year)
+    "base_year": 2026,             # Period 1 = 2026 (first decision year)
     "growth_rate": 0.12,           # 12%/yr market growth (Excel PARAM)
     "price_inflation_rate": 0.07,  # 7%/yr price inflation (Excel PARAM)
-    "num_periods": 8,              # 8 decision periods (2027-2034)
+    "num_periods": 8,              # 8 decision periods (2026-2033)
 
     # ── Customer segments (6) ─────────────────────────────────────────────────
     "segments": {
@@ -304,7 +304,15 @@ MARKET_CONFIG = {
 
         # Promotions (absolute discount %, stored as negative in ScenarioInput)
         "promo_standard_max": -0.05,        # standard promo: max 5% discount
-        "promo_liquidation_max": -0.20,     # liquidation promo: max 20% (PARAM Max_Liquidation_Promo)
+        # Liquidation : promo cible chiffrier −10 % (plancher Excel / règle pédagogique)
+        "promo_liquidation_max": -0.10,
+
+        # Stock reporté (année précédente) — entrée P1 des scénarios rapport / chiffrier
+        "reference_carryover_stock_units": 200,
+
+        # Production cible active (hors lancement 1 000–2 000)
+        "production_min_units_active": 1_500,
+        "production_max_units_active": 3_000,
 
         # Profitability
         "min_profit_rate": 0.02,            # hard minimum: 2% of revenue
@@ -337,7 +345,10 @@ MARKET_CONFIG = {
         # Production / stock (seuils_alertes_production_stock_simulation_VAE.docx)
         "inventory_carrying_rate": 0.025,
         "stock_surplus_units_threshold": 200,
+        # Surplus de stock final au-delà du seuil : 5 % jusqu’à 201 u. incluses au-delà du seuil, puis 8 % sur l’excédent au-delà de 201 u.
         "stock_surplus_penalty_rate": 0.05,
+        "stock_surplus_penalty_rate_high": 0.08,
+        "stock_surplus_penalty_high_from_units": 201,
         "stock_coverage_red_under": 0.90,
         "stock_coverage_orange_under": 1.00,
         "stock_coverage_green_max": 1.10,
@@ -346,6 +357,9 @@ MARKET_CONFIG = {
         "stock_final_warn_pct_of_demand": 0.10,
         "stock_final_surplus_pct_of_demand": 0.20,
         "stock_storage_vs_gross_profit_pct": 0.05,
+
+        # Portefeuille : au-delà de baseline_models + N (si baseline définie par firme dans MARKET_CONFIG firms)
+        "portfolio_max_extra_models": 2,
     },
 
     # ── Marketing channels ────────────────────────────────────────────────────

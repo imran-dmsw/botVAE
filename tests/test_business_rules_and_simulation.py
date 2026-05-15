@@ -27,7 +27,7 @@ def _base_scenario() -> ScenarioInput:
         model_range="mid",
         product_status="active",
         marketing_budget=80000,
-        rd_budget=15000,
+        rd_budget=0,
         price=3200,
         production=1500,
         adjusted_budget=1_200_000,
@@ -43,8 +43,8 @@ class TestBusinessRulesAndSimulation(unittest.TestCase):
     def test_validate_promo_rate(self):
         self.assertTrue(validate_promo_rate(-0.05)[0])
         self.assertFalse(validate_promo_rate(-0.07)[0])
-        self.assertTrue(validate_promo_rate(-0.20, liquidation=True)[0])
-        self.assertFalse(validate_promo_rate(-0.21, liquidation=True)[0])
+        self.assertTrue(validate_promo_rate(-0.10, liquidation=True)[0])
+        self.assertFalse(validate_promo_rate(-0.11, liquidation=True)[0])
 
     def test_liquidation_next_period_production_zero(self):
         sc = _base_scenario().model_copy(update={"liquidation": True})
