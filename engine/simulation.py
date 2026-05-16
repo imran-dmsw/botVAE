@@ -59,7 +59,7 @@ def default_competitor_attractiveness(segment: str) -> float:
 def total_market_size(period: int) -> float:
     """Return total market size (units) for the given period.
 
-    period 1 (2026): 110,000 * 1.12^1 ; period 8 (2033): 110,000 * 1.12^8
+    P0 (2026 ref.): 110,000 * 1.12^0 ; P8 (2034): 110,000 * 1.12^8
     """
     base = MARKET_CONFIG["base_market_size"]   # 110,000 (reference year 2026)
     g = MARKET_CONFIG["growth_rate"]            # 0.12
@@ -72,8 +72,8 @@ def segment_size(period: int, segment: str) -> float:
 
 
 def period_to_year(period: int) -> int:
-    """period 1 → base_year (2026), period 8 → 2033."""
-    return MARKET_CONFIG["base_year"] + (period - 1)
+    """P0 = année de référence (2026), P1 = 2027, …, P8 = 2034 (aucune décision en P0)."""
+    return MARKET_CONFIG["base_year"] + period
 
 
 def period_inflation_factor(period: int) -> float:

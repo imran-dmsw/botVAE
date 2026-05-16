@@ -54,33 +54,6 @@ def build_prioritized_alerts(
 
     adj = max(float(scenario.adjusted_budget or 0.0), 1.0)
 
-    range_raw = getattr(product, "range_raw", None) if product is not None else None
-    if range_raw:
-        key = str(range_raw).strip()
-        floor = CATALOGUE_FLOORS.get(key)
-        if floor is None:
-            floor = RANGE_PRICE_FLOORS.get(key)
-        if floor is not None and scenario.price < floor:
-            add(
-                "critique",
-                "prix_gamme",
-                (
-                    f"Prix catalogue {_fmt_money(scenario.price)} $ inférieur au plancher "
-                    f"{range_raw} ({_fmt_money(floor)} $)."
-                ),
-            )
-    else:
-        floor = RANGE_PRICE_FLOORS.get(scenario.model_range)
-        if floor is not None and scenario.price < floor:
-            add(
-                "critique",
-                "prix_gamme",
-                (
-                    f"Prix catalogue { _fmt_money(scenario.price) } $ inférieur au plancher "
-                    f"{scenario.model_range} ({_fmt_money(floor)} $)."
-                ),
-            )
-
     if result.margin < 0.05:
         add(
             "critique",
@@ -137,19 +110,20 @@ def build_prioritized_alerts(
         )
 
     if scenario.period >= 2 and scenario.rd_budget > 0:
-        allowed = firm_rd_allowed_pcts()
         intensity = scenario.rd_budget / adj
-        if allowed:
-            parts = ", ".join(f"{int(round(p * 100))} %" for p in allowed)
-            closest = min(allowed, key=lambda p: abs(p - intensity))
-            add(
-                "information",
-                "rd_niveaux",
-                (
-                    f"R&D à {intensity * 100:.2f} % du budget ajusté — niveaux discrets autorisés : {parts}. "
-                    f"Snap pédagogique le plus proche : {closest * 100:.0f} % (droits de lancement alignés 2 / 5 / 8 %)."
-                ),
-            )
+        add(
+            "information",
+            "rd_niveaux",
+            (
+                f"R&D à {intensity * 100:.2f} % du budget ajusté.\n"
+                "- 2 % → Amélioration des modèles existants uniquement, "
+                "aucun nouveau lancement autorisé.\n"
+                "- 5 % → Amélioration des existants + lancement de "
+                "1 nouveau modèle autorisé à cette période.\n"
+                "- 8 % → Amélioration des existants + lancement de "
+                "2 nouveaux modèles autorisés à cette période."
+            ),
+        )
 
     mkt_max = adj * MARKET_CONFIG["constraints"]["marketing_max_pct"]
     if scenario.marketing_budget > mkt_max * 1.02:
@@ -185,6 +159,8 @@ def build_prioritized_alerts(
 
     for alert in result.alerts:
         low = alert.lower()
+        if "plage recommand" in low or "au-dessus de la plage" in low:
+            continue
         if "critique" in low or "bloquant" in low:
             add("critique", "moteur", alert)
         elif "attention" in low or "risque" in low:
