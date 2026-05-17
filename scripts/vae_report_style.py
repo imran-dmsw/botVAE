@@ -160,26 +160,42 @@ P_COVER_SUB = ParagraphStyle(
 )
 
 
-def pdf_escape(s: str) -> str:
-    """Échappe le XML ReportLab et degrade quelques glyphes hors Helvetica WinAnsi."""
-    t = (
-        str(s)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace("✓ ", "")
-        .replace("✓", "")
-        .replace("✗ ", "X ")
-        .replace("✗", "X ")
-        .replace("⚠ ", "! ")
-        .replace("⚠", "! ")
-    )
+def pdf_safe_text(s: str) -> str:
+    """Remplace glyphes hors WinAnsi/Helvetica (carrés noirs en PDF) par des équivalents ASCII."""
+    t = str(s)
+    for old, new in (
+        ("\u26a0\ufe0f", "! "),
+        ("\u26a0", "! "),
+        ("\u2713", "OK "),
+        ("\u2717", "X "),
+        ("\u2605", "* "),
+        ("\u2014", " - "),
+        ("\u2013", "-"),
+        ("\u2015", "-"),
+        ("\u2212", "-"),
+        ("\u2026", "..."),
+        ("\u2192", "->"),
+        ("\u00b7", " - "),
+        ("\u2265", ">="),
+        ("\u2264", "<="),
+        ("\u00ab", '"'),
+        ("\u00bb", '"'),
+        ("\u00b1", "+/-"),
+    ):
+        t = t.replace(old, new)
     return t
+
+
+def pdf_escape(s: str) -> str:
+    """Échappe le XML ReportLab et normalise le texte pour Helvetica (WinAnsi)."""
+    t = pdf_safe_text(s)
+    return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def pdf_xml_fragment(s: str) -> str:
     """Échappe &, <, > pour un fragment inséré dans un paragraphe ReportLab qui utilise déjà des balises (<b>, …)."""
-    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    t = pdf_safe_text(s)
+    return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def HR() -> Table:
@@ -392,7 +408,7 @@ def build_doc(
     filepath: str | Path,
     story: list,
     firm_code: str = "XXX",
-    left_text: str = "Simulation marché VAE — Usage interne",
+    left_text: str = "Simulation marche VAE - Usage interne",
     *,
     report_date: str | None = None,
 ) -> None:
@@ -501,6 +517,7 @@ __all__ = [
     "cover_banner",
     "kpi_block",
     "pdf_escape",
+    "pdf_safe_text",
     "pdf_xml_fragment",
     "table_standard",
     "td",

@@ -123,8 +123,8 @@ def fmt_pct_and_money(pct: float, amount: float, dec: int = 2) -> str:
 def fmt_service_rate(rate: float) -> str:
     label = fmt_pct(rate, 2)
     if float(rate) < SERVICE_THRESHOLD:
-        return f"⚠ {label} — sous le seuil"
-    return f"✓ {label} — seuil atteint"
+        return f"! {label} - sous le seuil"
+    return f"OK {label} - seuil atteint"
 
 
 def _marketing_intensity_label(pct_fraction: float) -> str:
@@ -139,12 +139,13 @@ def _marketing_intensity_label(pct_fraction: float) -> str:
         cls = "Intense"
     else:
         cls = "Hors bande"
-    return f"{fmt_pct(pct_fraction, 2)} — {cls}"
+    return f"{fmt_pct(pct_fraction, 2)} - {cls}"
 
 
 def _cross_matrix_cell_pct_units(pct: float) -> str:
     units = int(round(float(pct) / 100.0 * MARKET_TOTAL_P1_UNITS))
-    return f"{fmt_pct(pct / 100.0, 2)} / {units:,} u.".replace(",", " ")
+    units_str = f"{units:,}".replace(",", " ")
+    return f"{fmt_pct(pct / 100.0, 2)} / {units_str} u."
 
 
 def _p040_projection_economics(sales: int) -> tuple[float, float]:
@@ -283,7 +284,7 @@ def growth_rows(firm: str) -> tuple[list[list[str]], str]:
     for p in range(0, 9):
         tot = total_market_size(p)
         seg = segment_size(p, seg_key)
-        growth = "" if p == 0 else f"+{(tot / p0_tot - 1) * 100:.0f} %"
+        growth = "" if p == 0 else f"+{fmt_pct((tot / p0_tot - 1), 2).removesuffix(' %')}"
         rows.append(
             [
                 f"P{p}",
@@ -622,7 +623,7 @@ def _append_readme_guide(story: list) -> None:
         (
             "Comment lire ce rapport",
             "Chaque section combine tableaux chiffrés, notes pédagogiques et alertes priorisées. "
-            "Les pourcentages sont affichés avec deux décimales. Les symboles ★ ⚠ ✓ signalent "
+            "Les pourcentages sont affichés avec deux décimales. Les symboles * ! OK signalent "
             "respectivement un point fort, une vigilance et un seuil atteint.",
         ),
         (
@@ -637,8 +638,8 @@ def _append_readme_guide(story: list) -> None:
         ),
         (
             "Légende des codes couleur et symboles",
-            "★ point fort ou produit phare · ⚠ sous le seuil ou anomalie · ✓ objectif atteint "
-            "(ex. taux de service ≥ 85 %).",
+            "* point fort ou produit phare - ! sous le seuil ou anomalie - OK objectif atteint "
+            "(ex. taux de service >= 85 %).",
         ),
         (
             "Source des données",
@@ -657,9 +658,9 @@ def _append_cover_exec_toc(story: list, code_firme: str, vue_firme: dict[str, An
     legend = vue_firme["legend"]
     best = max(vue_firme["firm_results"], key=lambda row: row[3].profit)
     summary = (
-        f"<b>Résumé exécutif.</b> {pdf_escape(legend)} — {len(vue_firme['firm_results'])} scénarios firmes simulés. "
+        f"<b>Résumé exécutif.</b> {pdf_escape(legend)} - {len(vue_firme['firm_results'])} scénarios firmes simulés. "
         f"Meilleur profit: <b>{pdf_escape(scenario_display_title(best[0]))}</b> ({fmt_money(best[3].profit)} $). "
-        f"Le rapport regroupe une vue firme (sections 1.1 à 1.7, 1.10) puis {len(fiches_modeles)} fiches modèle."
+        f"Le rapport regroupe une vue firme (sections 1.1 à 1.8, 1.10) puis {len(fiches_modeles)} fiches modèle."
     )
     story.append(cover_banner("RAPPORT VAE - ANALYSE STRATEGIQUE", f"Firme {code_firme} - {legend}"))
     story.append(Spacer(1, 10))
@@ -678,7 +679,7 @@ def _append_cover_exec_toc(story: list, code_firme: str, vue_firme: dict[str, An
         "1.5 Portefeuille et performance",
         "1.6 Coefficients marketing par segment",
         "1.7 Reference + projections 1500/2250/3000",
-        "1.8 Recherche et Developpement — suivi par periode",
+        "1.8 Recherche et Developpement - suivi par periode",
         "1.10 Recommandations",
         "PARTIE VUE MODELE",
     ]
@@ -694,7 +695,7 @@ def _append_section_11_dashboard(story: list, firm_results: list[tuple[str, str,
         ("Scenarios", str(len(firm_results)), NAVY),
         ("Meilleur profit", f"{fmt_money(max(r[3].profit for r in firm_results))} $", NAVY),
         ("Marge max", fmt_pct(max(r[3].margin for r in firm_results)), NAVY),
-        ("Service max", fmt_pct(max(r[3].service_rate for r in firm_results)), NAVY),
+        ("Service max", fmt_service_rate(max(r[3].service_rate for r in firm_results)), NAVY),
     ]
     story.append(kpi_block(kpi_items))
     rows: list[list[str]] = []
@@ -792,7 +793,7 @@ def _append_sections_12_14_context(story: list, wb: openpyxl.Workbook, firm: str
             [CONTENT_WIDTH * 0.13, CONTENT_WIDTH * 0.14, CONTENT_WIDTH * 0.25, CONTENT_WIDTH * 0.25, CONTENT_WIDTH * 0.23],
         )
     )
-    append_reading_note(story, "P0 = annee de reference 2026 (aucune decision). P1 = 2027, …, P8 = 2034. Croissance +12 %/an.")
+    append_reading_note(story, "P0 = annee de reference 2026 (aucune decision). P1 = 2027, ..., P8 = 2034. Croissance +12 %/an.")
 
 
 def _append_cross_matrix(story: list, cross: dict[str, Any]) -> None:
@@ -938,16 +939,15 @@ def _append_section_17_reference(story: list, vue_firme: dict[str, Any]) -> None
                 str(res.sales),
                 fmt_service_rate(res.service_rate),
                 fmt_money(res.forecast_ending_stock_units),
-                fmt_money(res.profit),
                 fmt_money(profit_p040),
                 fmt_pct(margin_p040),
             ]
         )
     story.append(
         table_standard(
-            ["Production", "Ventes", "Service", "Stock fin", "Profit", "Profit ($) P040", "Marge (%) P040"],
+            ["Production", "Ventes", "Service", "Stock fin.", "Profit ($)", "Marge (%)"],
             proj_rows,
-            [CONTENT_WIDTH * 0.11, CONTENT_WIDTH * 0.09, CONTENT_WIDTH * 0.16, CONTENT_WIDTH * 0.11, CONTENT_WIDTH * 0.13, CONTENT_WIDTH * 0.14, CONTENT_WIDTH * 0.12],
+            [CONTENT_WIDTH * 0.12, CONTENT_WIDTH * 0.10, CONTENT_WIDTH * 0.18, CONTENT_WIDTH * 0.12, CONTENT_WIDTH * 0.14, CONTENT_WIDTH * 0.14],
         )
     )
     append_reading_note(
@@ -992,17 +992,17 @@ def _append_section_17_reference(story: list, vue_firme: dict[str, Any]) -> None
 
 
 def _append_section_18_rd_tracking(story: list, vue_firme: dict[str, Any], active_models: int) -> None:
-    H1(story, "1.8 Recherche & Developpement — Suivi par periode")
+    H1(story, "1.8 Recherche & Developpement - Suivi par periode")
     ref_scen: ScenarioInput = vue_firme["ref_scen"]
     adj = firm_adjusted_budget_from_scenario(ref_scen)
     rd_amt = ref_scen.firm_rd_budget_total
     rd_pct = rd_amt / max(adj, 1.0)
-    undefined = "— a definir —"
+    undefined = "- a definir -"
     rows: list[list[str]] = []
     for p in range(0, 9):
         year = period_to_year(p)
         if p == 0:
-            rows.append([f"P{p}", str(year), "0,00 %", "0 $", "Aucune (P0)", "—", "—", str(active_models)])
+            rows.append([f"P{p}", str(year), "0,00 %", "0 $", "Aucune (P0)", "-", "-", str(active_models)])
         elif p == 2:
             rows.append(
                 [
@@ -1011,8 +1011,8 @@ def _append_section_18_rd_tracking(story: list, vue_firme: dict[str, Any], activ
                     fmt_pct(rd_pct, 2),
                     f"{fmt_money(rd_amt)} $",
                     "Amelioration existants + lancement (ref. 5 %)",
-                    "—",
-                    "—",
+                    "-",
+                    "-",
                     str(active_models),
                 ]
             )
@@ -1134,8 +1134,8 @@ def _append_model_part(
     append_reading_note(
         story,
         "Lecture des leviers : chaque ligne teste une decision isolee a production et prix identiques sauf indication. "
-        "Le levier 'Marketing maximum' augmente le budget marketing au maximum autorise (10 %) en maintenant la meme production "
-        "— cela permet d'isoler l'impact pur du marketing sur la demande, independamment de la capacite. "
+        "Le levier 'Marketing plafond' augmente le budget marketing au maximum autorise (10 %) en maintenant la meme production "
+        "- cela permet d'isoler l'impact pur du marketing sur la demande, independamment de la capacite. "
         "Ecart demande : nombre d'unites demandees par le marche mais non servies faute de stock suffisant. "
         "Formule : Ecart = Demande estimee segment - Ventes reelles. "
         "Un ecart eleve signale une opportunite de production supplementaire ou une perte de parts de marche.",
